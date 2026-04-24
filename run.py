@@ -16,6 +16,9 @@ from typing import Callable
 from cnlib.base_strategy import BaseStrategy
 from research.backtest_window import run_backtest_window
 
+ROOT_DIR = Path(__file__).resolve().parent
+SYNTHETIC_DATASET_DIR = ROOT_DIR / "synthetic_cnlib_data"
+
 # ---------------------------------------------------------------------------
 # Strategy registry — add new strategies here as they're built
 # ---------------------------------------------------------------------------
@@ -44,6 +47,11 @@ STRATEGIES: dict[str, StrategyFactory] = {
     "meanrevert": _mean_revert_strategy,
 }
 
+DATASET_PRESETS: dict[str, Path | None] = {
+    "cnlib": None,
+    "synthetic": SYNTHETIC_DATASET_DIR,
+}
+
 
 def get_strategy(name: str):
     factory = STRATEGIES.get(name)
@@ -51,6 +59,24 @@ def get_strategy(name: str):
         available = ", ".join(STRATEGIES)
         raise ValueError(f"Unknown strategy '{name}'. Available: {available}")
     return factory()
+
+
+def resolve_data_dir(dataset: str, data_dir: Path | None) -> Path | None:
+    if data_dir is not None:
+        return data_dir
+
+    resolved = DATASET_PRESETS.get(dataset)
+    if dataset not in DATASET_PRESETS:
+        available = ", ".join(sorted(DATASET_PRESETS))
+        raise ValueError(f"Unknown dataset '{dataset}'. Available: {available}")
+    if resolved is None:
+        return None
+    if not resolved.exists():
+        raise FileNotFoundError(
+            f"Dataset preset '{dataset}' is not available at {resolved}. "
+            "Run `python research/generate_synthetic_datasets.py` first."
+        )
+    return resolved
 
 
 def plot_equity(result, strategy_name: str) -> None:
@@ -96,7 +122,14 @@ def main():
     parser.add_argument("--start",    type=int,   default=0, help="start_candle (warm-up skip)")
     parser.add_argument("--end",      type=int,   default=None, help="inclusive end_candle")
     parser.add_argument("--data-dir", type=Path,  default=None, help="directory containing coin parquet files")
+    parser.add_argument(
+        "--dataset",
+        default="cnlib",
+        choices=sorted(DATASET_PRESETS),
+        help="dataset preset to use when --data-dir is not provided",
+    )
     parser.add_argument("--list-strategies", action="store_true", help="show available strategies and exit")
+    parser.add_argument("--list-datasets", action="store_true", help="show dataset presets and exit")
     parser.add_argument("--plot",     action="store_true")
     parser.add_argument("--silent",   action="store_true")
     args = parser.parse_args()
@@ -106,19 +139,34 @@ def main():
             print(f"{name}\tready")
         return
 
+    if args.list_datasets:
+        for name, path in DATASET_PRESETS.items():
+            location = "bundled cnlib data" if path is None else str(path)
+            status = "ready" if path is None or path.exists() else "missing"
+            print(f"{name}\t{status}\t{location}")
+        return
+
     try:
         strategy = get_strategy(args.strategy)
+        data_dir = resolve_data_dir(args.dataset, args.data_dir)
     except ValueError as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(2)
+    except FileNotFoundError as exc:
         print(exc, file=sys.stderr)
         sys.exit(2)
 
     print(f"Running strategy: {args.strategy}")
+    if args.data_dir is not None:
+        print(f"Dataset: custom ({args.data_dir})")
+    else:
+        print(f"Dataset: {args.dataset}")
     result = run_backtest_window(
         strategy,
         initial_capital=args.capital,
         start_candle=args.start,
         end_candle=args.end,
-        data_dir=args.data_dir,
+        data_dir=data_dir,
         silent=args.silent,
     )
     result.print_summary()

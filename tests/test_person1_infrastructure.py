@@ -241,6 +241,21 @@ class TestRunnerAndWalkForward(unittest.TestCase):
         with self.assertRaises(ValueError):
             run.get_strategy("missing")
 
+    def test_dataset_resolution_prefers_explicit_dir_and_supports_presets(self):
+        import run
+
+        explicit = Path("/tmp/custom-data")
+        self.assertEqual(run.resolve_data_dir("cnlib", explicit), explicit)
+        self.assertIsNone(run.resolve_data_dir("cnlib", None))
+
+        with patch.object(run, "SYNTHETIC_DATASET_DIR", Path("/tmp/synthetic")):
+            with patch.dict(run.DATASET_PRESETS, {"cnlib": None, "synthetic": Path("/tmp/synthetic")}, clear=True):
+                with patch.object(Path, "exists", return_value=True):
+                    self.assertEqual(
+                        run.resolve_data_dir("synthetic", None),
+                        Path("/tmp/synthetic"),
+                    )
+
     def test_walk_forward_runs_only_train_fold_windows(self):
         data = make_coin_data(TEST_START + 20)
         strategies: list[FlatStrategy] = []

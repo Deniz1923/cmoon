@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -10,6 +11,12 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_PATH = ROOT / ".venv" / "Lib" / "site-packages" / "cnlib" / "data" / "kapcoin-usd_train.parquet"
 OUTPUT_DIR = ROOT / "synthetic_data"
+CNLIB_COMPAT_DIR = ROOT / "synthetic_cnlib_data"
+CNLIB_NAMES = [
+    "kapcoin-usd_train.parquet",
+    "metucoin-usd_train.parquet",
+    "tamcoin-usd_train.parquet",
+]
 
 
 @dataclass(frozen=True)
@@ -119,6 +126,7 @@ def _build_ohlcv(dates: pd.Series, close: np.ndarray, spec: SeriesSpec) -> pd.Da
 
 def main() -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
+    CNLIB_COMPAT_DIR.mkdir(exist_ok=True)
     dates = _load_dates()
     length = len(dates)
     ref_rng = np.random.default_rng(20260425)
@@ -189,6 +197,7 @@ def main() -> None:
     ]
 
     generated_closes: dict[str, np.ndarray] = {}
+    generated_paths: dict[str, Path] = {}
     for spec in specs:
         base_returns = None if spec.fully_random else shared_base_returns
         if spec.inverse_of:
@@ -201,6 +210,7 @@ def main() -> None:
         df = _build_ohlcv(dates, close, spec)
         out_path = OUTPUT_DIR / f"{spec.name}.parquet"
         df.to_parquet(out_path, index=False)
+        generated_paths[spec.name] = out_path
 
         first_close = float(df["Close"].iloc[0])
         last_close = float(df["Close"].iloc[-1])
@@ -208,6 +218,16 @@ def main() -> None:
             f"{out_path.name}: rows={len(df)} start={first_close:.2f} "
             f"end={last_close:.2f} change={(last_close / first_close - 1) * 100:.2f}%"
         )
+
+    compat_mapping = {
+        "kapcoin-usd_train.parquet": generated_paths["btc_like_momentum"],
+        "metucoin-usd_train.parquet": generated_paths["btc_like_breakout"],
+        "tamcoin-usd_train.parquet": generated_paths["btc_like_inverse"],
+    }
+    for target_name in CNLIB_NAMES:
+        source = compat_mapping[target_name]
+        shutil.copy2(source, CNLIB_COMPAT_DIR / target_name)
+    print(f"cnlib-compatible synthetic dataset written to: {CNLIB_COMPAT_DIR}")
 
 
 if __name__ == "__main__":
