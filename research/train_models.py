@@ -24,6 +24,8 @@ import pandas as pd
 #   from xgboost import XGBClassifier   (pip install xgboost)
 #   from lightgbm import LGBMClassifier (pip install lightgbm)
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 
 from cnlib.base_strategy import BaseStrategy, COINS
 from research.ml_features import build_X_y, feature_names
@@ -33,6 +35,11 @@ RESULTS_DIR.mkdir(exist_ok=True)
 
 # Train/test split — NEVER tune hyperparameters against TEST set
 TRAIN_END_CANDLE = 1100   # candles 0–1099 = train, 1100–1569 = test (holdout)
+PARAM_GRID = {
+    "n_estimators": [100, 200, 500],
+    "max_depth": [3, 5, 8, None],
+    "min_samples_leaf": [5, 10, 20],
+}
 
 
 def load_all_data() -> dict[str, pd.DataFrame]:
@@ -47,7 +54,7 @@ def load_all_data() -> dict[str, pd.DataFrame]:
 def train_coin_model(
     coin: str,
     coin_data: dict[str, pd.DataFrame],
-) -> tuple[object, np.ndarray, np.ndarray]:
+) -> tuple[object, np.ndarray, np.ndarray, dict]:
     """
     Train a model for one coin.
     Returns (fitted_model, X_test, y_test) — caller evaluates test performance.
@@ -55,34 +62,69 @@ def train_coin_model(
     X, y, valid_index = build_X_y(coin_data, coin)
 
     # Time-series split — no shuffling
-    train_mask = valid_index < valid_index[min(TRAIN_END_CANDLE, len(valid_index) - 1)]
-    X_train, y_train = X[train_mask],  y[train_mask]
-    X_test,  y_test  = X[~train_mask], y[~train_mask]
+    split_at = min(TRAIN_END_CANDLE, len(valid_index))
+    X_train, y_train = X[:split_at], y[:split_at]
+    X_test, y_test = X[split_at:], y[split_at:]
 
     print(f"\n{coin}")
     print(f"  Train samples: {len(X_train)}, Test samples: {len(X_test)}")
     print(f"  Train class balance: {y_train.mean():.2%} positive")
 
-    # TODO: tune hyperparameters via TimeSeriesSplit cross-validation on train set only
-    #       from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
-    model = RandomForestClassifier(
-        n_estimators=200,    # TODO: try 100, 200, 500
-        max_depth=5,         # TODO: try 3, 5, 8, None — deeper = more overfit risk
-        min_samples_leaf=20, # TODO: higher = more regularization
-        random_state=42,
+    n_splits = min(4, max(len(X_train) // 150, 2))
+    cv = TimeSeriesSplit(n_splits=n_splits)
+    search = GridSearchCV(
+        estimator=RandomForestClassifier(random_state=42, n_jobs=-1),
+        param_grid=PARAM_GRID,
+        scoring="f1",
+        cv=cv,
         n_jobs=-1,
+        refit=True,
+    )
+    search.fit(X_train, y_train)
+    model = search.best_estimator_
+    print(f"  Best params: {search.best_params_}")
+    print(f"  Best CV F1: {search.best_score_:.4f}")
+
+    train_pred = model.predict(X_train)
+    train_prob = model.predict_proba(X_train)[:, 1]
+    train_metrics = evaluate_predictions(y_train, train_pred, train_prob)
+    print(
+        "  Train metrics:"
+        f" acc={train_metrics['accuracy']:.2%}"
+        f" precision={train_metrics['precision']:.2%}"
+        f" recall={train_metrics['recall']:.2%}"
+        f" f1={train_metrics['f1']:.2%}"
+        f" auc={train_metrics['roc_auc']:.4f}"
     )
 
-    model.fit(X_train, y_train)
+    metrics = {}
+    if len(X_test):
+        test_pred = model.predict(X_test)
+        test_prob = model.predict_proba(X_test)[:, 1]
+        metrics = evaluate_predictions(y_test, test_pred, test_prob)
+        print(
+            "  Holdout metrics:"
+            f" acc={metrics['accuracy']:.2%}"
+            f" precision={metrics['precision']:.2%}"
+            f" recall={metrics['recall']:.2%}"
+            f" f1={metrics['f1']:.2%}"
+            f" auc={metrics['roc_auc']:.4f}"
+        )
 
-    train_acc = (model.predict(X_train) == y_train).mean()
-    test_acc  = (model.predict(X_test)  == y_test).mean()
-    print(f"  Train accuracy: {train_acc:.2%}  Test accuracy: {test_acc:.2%}")
-    # TODO: also print precision/recall/F1 — accuracy is misleading on imbalanced data
-    #       from sklearn.metrics import classification_report
-    #       print(classification_report(y_test, model.predict(X_test)))
+    return model, X_test, y_test, metrics
 
-    return model, X_test, y_test
+
+def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) -> dict:
+    metrics = {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "precision": precision_score(y_true, y_pred, zero_division=0),
+        "recall": recall_score(y_true, y_pred, zero_division=0),
+        "f1": f1_score(y_true, y_pred, zero_division=0),
+        "roc_auc": np.nan,
+    }
+    if len(np.unique(y_true)) > 1:
+        metrics["roc_auc"] = roc_auc_score(y_true, y_prob)
+    return metrics
 
 
 def save_model(model, coin: str) -> Path:
@@ -120,7 +162,7 @@ if __name__ == "__main__":
 
     models = {}
     for coin in COINS:
-        model, X_test, y_test = train_coin_model(coin, coin_data)
+        model, X_test, y_test, metrics = train_coin_model(coin, coin_data)
         save_model(model, coin)
         models[coin] = model
 

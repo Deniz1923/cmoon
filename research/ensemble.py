@@ -8,10 +8,9 @@ The idea: only trade when both the rule-based signal and the ML model agree.
 Disagreement = stay flat = avoid the trade. This kills win rate but
 dramatically improves precision on the trades you do take.
 """
-import numpy as np
 import pandas as pd
 
-from research.features import atr, atr_pct, COINS
+from research.features import atr, atr_pct
 from research.risk import dynamic_leverage, stop_loss_price, take_profit_price, position_allocation
 
 # ---------------------------------------------------------------------------
@@ -20,7 +19,7 @@ from research.risk import dynamic_leverage, stop_loss_price, take_profit_price, 
 
 ML_CONFIDENCE_THRESHOLD = 0.60   # TODO: try 0.55, 0.60, 0.65, 0.70
                                   # Higher = fewer trades, higher precision
-ML_STRONG_THRESHOLD = 0.70       # TODO: above this → full allocation
+ML_STRONG_THRESHOLD = 0.80       # TODO: above this → full allocation
                                   # Below this but above base → half allocation
 
 ATR_PERIOD = 14
@@ -59,32 +58,33 @@ def combine(
         # Signals disagree → stay flat
         return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
 
-    if ml_confidence < ML_CONFIDENCE_THRESHOLD - 0.5:
+    if ml_confidence < ML_CONFIDENCE_THRESHOLD:
         # ML is too uncertain even though direction agrees
         return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
 
-    # TODO: compute ATR for dynamic sizing
-    # current_atr = atr(df, ATR_PERIOD).iloc[-1]
-    # current_atr_pct = atr_pct(df, ATR_PERIOD).iloc[-1]
-    # lev = dynamic_leverage(current_atr_pct)
-    # sl = stop_loss_price(close, trend_signal, current_atr)
-    # tp = take_profit_price(close, trend_signal, current_atr)
+    current_atr = atr(df, ATR_PERIOD).iloc[-1]
+    current_atr_pct = atr_pct(df, ATR_PERIOD).iloc[-1]
+    if pd.isna(current_atr) or pd.isna(current_atr_pct) or current_atr <= 0:
+        return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
 
-    # Confidence-scaled allocation
-    # TODO: scale alloc by ml_confidence — stronger signal = bigger position
-    # if ml_confidence >= ML_STRONG_THRESHOLD - 0.5:
-    #     alloc = position_allocation(n_active_coins=2)
-    # else:
-    #     alloc = position_allocation(n_active_coins=2) * 0.5
+    lev = dynamic_leverage(float(current_atr_pct))
+    sl = stop_loss_price(close, trend_signal, float(current_atr))
+    tp = take_profit_price(close, trend_signal, float(current_atr))
 
-    # TODO: return the full dict with SL/TP
-    # return {
-    #     "coin": coin, "signal": trend_signal,
-    #     "allocation": alloc, "leverage": lev,
-    #     "stop_loss": sl, "take_profit": tp,
-    # }
+    if ml_confidence >= ML_STRONG_THRESHOLD:
+        alloc_strength = 1.0
+    else:
+        alloc_strength = 0.5
+    alloc = position_allocation(n_active_coins=2, signal_strength=alloc_strength)
 
-    raise NotImplementedError("combine() not fully implemented")
+    return {
+        "coin": coin,
+        "signal": trend_signal,
+        "allocation": alloc,
+        "leverage": lev,
+        "stop_loss": sl,
+        "take_profit": tp,
+    }
 
 
 def flat(coin: str) -> dict:
