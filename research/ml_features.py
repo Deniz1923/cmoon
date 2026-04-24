@@ -10,8 +10,8 @@ import numpy as np
 import pandas as pd
 
 from research.features import (
-    ema, atr, atr_pct, rsi, bb_pct, bb_width,
-    momentum, volume_ratio, lead_lag_signal, rolling_correlation, COINS,
+    ema, atr_pct, rsi, bb_pct, bb_width,
+    momentum, volume_ratio, lead_lag_signal, rolling_correlation,
 )
 
 # How many candles ahead to predict (target horizon)
@@ -39,33 +39,34 @@ def build_features_single(df: pd.DataFrame, leader_close: pd.Series | None = Non
     feat = pd.DataFrame(index=df.index)
 
     # --- Returns ---
-    # TODO: add these
-    feat["ret_1"]  = close.pct_change(1)
-    feat["ret_3"]  = close.pct_change(3)
-    feat["ret_5"]  = close.pct_change(5)
+    feat["ret_1"] = close.pct_change(1)
+    feat["ret_3"] = close.pct_change(3)
+    feat["ret_5"] = close.pct_change(5)
+    feat["ret_10"] = close.pct_change(10)
     feat["ret_20"] = close.pct_change(20)
 
     # --- Trend ---
-    # TODO: implement ema() in features.py first, then uncomment
-    # feat["ema_diff_20_50"] = (ema(close, 20) - ema(close, 50)) / close
+    ema_20 = ema(close, 20)
+    ema_50 = ema(close, 50)
+    feat["ema_diff_20_50"] = (ema_20 - ema_50) / close
+    feat["close_vs_ema_20"] = (close - ema_20) / close
+    feat["close_vs_ema_50"] = (close - ema_50) / close
 
     # --- Momentum / oscillators ---
-    # TODO: implement rsi(), bb_pct(), bb_width() in features.py first
-    # feat["rsi_14"]    = rsi(close, 14)
-    # feat["bb_pct_20"] = bb_pct(close, 20)
-    # feat["bb_width"]  = bb_width(close, 20)
-    # feat["mom_10"]    = momentum(close, 10)
+    feat["rsi_14"] = rsi(close, 14)
+    feat["bb_pct_20"] = bb_pct(close, 20)
+    feat["bb_width_20"] = bb_width(close, 20)
+    feat["mom_10"] = momentum(close, 10)
 
-    # --- Volatility ---
-    # TODO: implement atr_pct() in features.py first
-    # feat["atr_pct_14"] = atr_pct(df, 14)
-    # feat["vol_ratio"]  = volume_ratio(df, 20)
+    # --- Volatility / participation ---
+    feat["atr_pct_14"] = atr_pct(df, 14)
+    feat["vol_ratio_20"] = volume_ratio(df, 20)
 
     # --- Cross-coin (lead-lag) ---
-    # TODO: implement lead_lag_signal() in features.py first
-    # if leader_close is not None:
-    #     feat["leader_ret_1"] = lead_lag_signal(leader_close, close, lag=1)
-    #     feat["leader_ret_3"] = lead_lag_signal(leader_close, close, lag=3)
+    if leader_close is not None:
+        feat["leader_ret_1"] = lead_lag_signal(leader_close, close, lag=1)
+        feat["leader_ret_3"] = lead_lag_signal(leader_close, close, lag=3)
+        feat["leader_corr_30"] = rolling_correlation(leader_close, close, n=30)
 
     return feat
 
@@ -94,18 +95,17 @@ def build_X_y(
     feat = build_features_single(df, leader_close=leader)
 
     # Target: did price go up over the next `horizon` candles?
-    future_return = df["Close"].pct_change(horizon).shift(-horizon)
-    # TODO: consider a threshold (e.g. > 0.01) to filter noise
+    future_return = df["Close"].shift(-horizon) / df["Close"] - 1.0
     y_raw = (future_return > 0).astype(int)
 
     # Align and drop NaN rows
-    combined = pd.concat([feat, y_raw.rename("target")], axis=1)
+    combined = pd.concat([feat, future_return.rename("future_return"), y_raw.rename("target")], axis=1)
     combined = combined.dropna()
 
-    # Don't include the last `horizon` rows (no target available)
-    combined = combined.iloc[:-horizon]
+    if len(combined) > MIN_ROWS:
+        combined = combined.iloc[MIN_ROWS:]
 
-    X = combined.drop(columns=["target"]).values.astype(np.float32)
+    X = combined.drop(columns=["future_return", "target"]).values.astype(np.float32)
     y = combined["target"].values.astype(int)
     valid_index = combined.index
 
@@ -117,4 +117,4 @@ def feature_names(coin_data: dict, target_coin: str) -> list[str]:
     df = coin_data[target_coin]
     leader = coin_data["kapcoin-usd_train"]["Close"] if target_coin != "kapcoin-usd_train" else None
     feat = build_features_single(df, leader_close=leader)
-    return list(feat.columns)
+    return list(feat.dropna().columns)
