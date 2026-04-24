@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Organizer data and generated features are local competition material.
+data/raw/*
+data/features/*
+!data/raw/.gitkeep
+!data/features/.gitkeep
+
+# Model artifacts can be large; intentionally add final submission artifacts when needed.
+*.pkl
+*.pt
+*.joblib
+!submission/.gitkeep
+!submission/*.pkl
+!submission/*.pt
+!submission/*.joblib

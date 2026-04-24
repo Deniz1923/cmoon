@@ -1,9 +1,4 @@
-import numpy
-
-
-def main():
-    print("Hello from cmoon!")
-    print(numpy.version)
+from scripts.smoke import main
 
 
 if __name__ == "__main__":
