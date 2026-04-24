@@ -19,16 +19,16 @@ requires-dist = [{ name = "cnlib", specifier = ">=0.1.3" }]
 
 [[package]]
 name = "cnlib"
-version = "0.1.3"
+version = "0.1.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "pyarrow" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ee/7b/f54a2c8d4ac3f1321a47936aeba9f99cffdc2784862b9d71c291bede6324/cnlib-0.1.3.tar.gz", hash = "sha256:c9f97edc23af5108be5c2c73831da2fb7bbbbad029f4b3b24bcf14afe47eceee", size = 205871 }
+sdist = { url = "https://files.pythonhosted.org/packages/f8/a2/1d89d17a7faa709582da54254da7220e9d4ee570a922cf48c89de6f26f54/cnlib-0.1.4.tar.gz", hash = "sha256:424a91f0b2150d822fe4271eee22dede1e4f28e4208a6d56363ab4f30af70cd4", size = 206382 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/11/70/fadfc6137755489c31bce46254d45b3f4a01dfba870837a4dfdf4aae5ec1/cnlib-0.1.3-py3-none-any.whl", hash = "sha256:ac22d948e681e9da1a1e10b9a1563cce2a9af700e78482beae07940c2b61ba92", size = 206990 },
+    { url = "https://files.pythonhosted.org/packages/99/42/5989dfe37384f7ab6e593c745d101453d86a449ca89f02a60fea29b4baef/cnlib-0.1.4-py3-none-any.whl", hash = "sha256:1ebb6c167b9036d662d0a27af77ee1099769e30cd8b6cd73ed90d9eec87f946f", size = 207448 },
 ]
 
 [[package]]

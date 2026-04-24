@@ -40,15 +40,48 @@ cd cmoon
 the registry as a reserved placeholder, but selecting it exits cleanly until
 the ensemble implementation exists.
 
+## cnlib 0.1.4 compatibility
+
+The project is now locked to `cnlib` 0.1.4 in `uv.lock`. This version changed
+how strategy data is exposed:
+
+- Inside `predict(data)`, keep using the `data` argument. It contains history up
+  to the current candle and is the safe competition-facing API.
+- `strategy.coin_data` is now also sliced to the current `candle_index`; after
+  `get_data()` it may only expose candle 0 until the backtest advances.
+- Offline research code that needs the full dataset must use `strategy._full_data`
+  after `get_data()`.
+- `research.backtest_window.run_backtest_window()` already handles both the old
+  and new data models, and mirrors the new `failed_opens` result fields.
+
+Example for full-history research scripts:
+
+```python
+from cnlib.base_strategy import BaseStrategy
+
+class Loader(BaseStrategy):
+    def predict(self, data):
+        return []
+
+loader = Loader()
+loader.get_data()
+coin_data = loader._full_data  # full 1570-candle history in cnlib 0.1.4
+```
+
 ## Training ML models
 
 ML models must be trained once before running the ensemble strategy:
 
 ```bash
-python research/train_models.py
+.venv/bin/python research/train_models.py
 # → saves models to results/model_*.pkl
 # → saves results/feature_importance.csv
 ```
+
+Person 3 note: before relying on `research/train_models.py`, update its
+`load_all_data()` helper to return full history from `_full_data`, not
+`coin_data`. Otherwise model training under `cnlib` 0.1.4 can see only the
+initial sliced candle.
 
 ## Project structure
 

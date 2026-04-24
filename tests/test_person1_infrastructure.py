@@ -50,7 +50,7 @@ class DataBackedStrategy(BaseStrategy):
         self.calls: list[int] = []
 
     def get_data(self, data_dir=None):
-        self.coin_data = {coin: df.copy() for coin, df in self._source_data.items()}
+        self._full_data = {coin: df.copy() for coin, df in self._source_data.items()}
         return self.coin_data
 
 

@@ -33,15 +33,18 @@ def run_backtest_window(
     strategy.get_data(data_dir)
     portfolio = Portfolio(initial_capital=initial_capital)
 
-    first_coin = next(iter(strategy.coin_data.values()))
+    full_data = _full_coin_data(strategy)
+    first_coin = next(iter(full_data.values()))
     total_available = len(first_coin)
     start_candle, end_candle = _validate_window(start_candle, end_candle, total_available)
 
     portfolio_series: list[dict] = []
     trade_history: list[dict] = []
+    failed_open_history: list[dict] = []
     total_trades = 0
     validation_errors = 0
     strategy_errors = 0
+    failed_opens = 0
 
     if not silent:
         print(
@@ -89,6 +92,15 @@ def run_backtest_window(
                 "portfolio_value": round(turn["portfolio_value"], 2),
             })
 
+        for fail in turn.get("failed_opens", []):
+            failed_opens += 1
+            failed_open_history.append({
+                "candle_index": i,
+                "timestamp": first_coin.iloc[i]["Date"],
+                "coin": fail["coin"],
+                "error": fail["error"],
+            })
+
         _record(portfolio_series, i, portfolio, prices)
 
         if not silent and i % 100 == 0:
@@ -106,9 +118,22 @@ def run_backtest_window(
         total_liquidation_loss=summary["total_liquidation_loss"],
         validation_errors=validation_errors,
         strategy_errors=strategy_errors,
+        failed_opens=failed_opens,
         portfolio_series=portfolio_series,
         trade_history=trade_history,
+        failed_open_history=failed_open_history,
     )
+
+
+def _full_coin_data(strategy: BaseStrategy) -> dict:
+    """Return full loaded data across cnlib 0.1.3 and 0.1.4 style strategies."""
+    full_data = getattr(strategy, "_full_data", None)
+    if isinstance(full_data, dict) and full_data:
+        return full_data
+    coin_data = getattr(strategy, "coin_data", None)
+    if isinstance(coin_data, dict) and coin_data:
+        return coin_data
+    raise ValueError("strategy.get_data() did not load any coin data")
 
 
 def _validate_window(
