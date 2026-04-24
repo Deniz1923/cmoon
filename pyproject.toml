@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yarismaci-starter"
+version = "0.1.0"
+description = "Starter project for a trading competition participant"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "pyarrow>=14.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+  "backtest",
+  "competition",
+  "constants",
+  "data_loader",
+  "evaluation",
+  "indicators",
+  "model_types",
+  "output_writer",
+  "runner",
+  "strategy_loader",
+  "strategy_base",
+  "validation",
+]

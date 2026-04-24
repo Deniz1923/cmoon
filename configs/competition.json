@@ -1,0 +1,12 @@
+{
+  "coins": ["Varlik_A", "Varlik_B", "Varlik_C"],
+  "allowed_leverages": [2, 3, 5, 10],
+  "default_leverage": 2,
+  "allow_long": true,
+  "allow_short": true,
+  "max_total_ratio": 1.0,
+  "max_ratio_per_coin": 0.6,
+  "initial_equity": 3000,
+  "fee_rate": 0.0004,
+  "min_history": 50
+}
