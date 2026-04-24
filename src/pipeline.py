@@ -71,94 +71,167 @@ def run_pipeline(config_path: str = "config.yaml", eval_split: str = "val") -> d
         print("  Use this exactly once. No re-tuning after this run.")
         print("=" * 60)
 
-    symbol = config["market"]["symbols"][0]
     market_type = config["market"]["market_type"]
 
-    # ── 1. Load data ──────────────────────────────────────────────────────────
-    print(f"\n[1/7] Loading {symbol} ({market_type}) ...")
-    ohlcv = data_loader.load_ohlcv(symbol, market_type, config)
-    print(f"      {len(ohlcv)} bars  |  {ohlcv.index[0]}  →  {ohlcv.index[-1]}")
+    # ── 1. Discover universe ───────────────────────────────────────────────────
+    print("\n[1/7] Discovering coin universe ...")
+    symbols = data_loader.discover_universe(config)
+    if not symbols:
+        raise RuntimeError(
+            "No valid symbols discovered. Add data files to data/raw/ "
+            "or set universe_mode=explicit in config.yaml."
+        )
+    print(f"      {len(symbols)} symbol(s): {symbols}")
 
-    train_df, val_df, holdout_df = data_loader.get_splits(ohlcv, config)
-    print(f"      train={len(train_df)}  val={len(val_df)}  holdout={len(holdout_df)}")
+    # ── 2. Load data + build per-symbol features and labels ───────────────────
+    print("\n[2/7] Loading data and building features / labels ...")
+    train_feat_parts: list = []
+    train_label_parts: list = []
+    eval_feats_by_sym: dict = {}
+    eval_ohlcv_by_sym: dict = {}
 
-    eval_df = val_df if eval_split == "val" else holdout_df
+    for sym in symbols:
+        ohlcv = data_loader.load_ohlcv(sym, market_type, config)
+        train_df, val_df, holdout_df = data_loader.get_splits(ohlcv, config)
+        eval_df = val_df if eval_split == "val" else holdout_df
 
-    # ── 2. Features ───────────────────────────────────────────────────────────
-    print("\n[2/7] Building features ...")
-    train_feats = feature_engineering.build_features(train_df, config)
-    eval_feats = feature_engineering.build_features(eval_df, config)
+        # Per-symbol features
+        train_feats = feature_engineering.build_features(train_df, config)
+        eval_feats = feature_engineering.build_features(eval_df, config)
 
-    transformer = feature_engineering.fit_transformer(train_feats.dropna())
-    train_scaled = feature_engineering.transform(train_feats, transformer)
-    eval_scaled = feature_engineering.transform(eval_feats, transformer)
+        # Per-symbol labels
+        train_labels = labeling.make_labels(train_df, config)
+        eval_labels = labeling.make_labels(eval_df, config)
+
+        # Align train features ↔ labels
+        t_idx = train_feats.index.intersection(train_labels.index)
+        X_tr = train_feats.loc[t_idx].dropna().copy()
+        y_tr = train_labels.loc[X_tr.index, "target"]
+        X_tr["symbol"] = sym
+
+        # Align eval features ↔ labels (labels used for signal eval only, not model input)
+        e_idx = eval_feats.index.intersection(eval_labels.index)
+        X_ev = eval_feats.loc[e_idx].dropna().copy()
+        X_ev["symbol"] = sym
+
+        train_feat_parts.append(X_tr)
+        train_label_parts.append(y_tr)
+        eval_feats_by_sym[sym] = X_ev
+        eval_ohlcv_by_sym[sym] = eval_df
+
+        print(f"      {sym}: train={len(X_tr)}  eval={len(X_ev)}")
+
+    X_train_all = pd.concat(train_feat_parts).sort_index()
+    y_train_all = pd.concat(train_label_parts).sort_index()
+
+    # ── 3. Fit transformer on combined train features ──────────────────────────
+    print("\n[3/7] Fitting feature transformer ...")
+    feat_cols = [c for c in X_train_all.columns if c != "symbol"]
+    transformer = feature_engineering.fit_transformer(X_train_all[feat_cols].dropna())
 
     transformer_path = os.path.join(config["paths"]["models"], "transformer.pkl")
     feature_engineering.save_transformer(transformer, transformer_path)
     print(f"      Transformer saved → {transformer_path}")
     print(f"      Feature columns: {len(transformer.feature_cols)}")
 
-    # ── 3. Labels ─────────────────────────────────────────────────────────────
-    print("\n[3/7] Building labels ...")
-    train_labels = labeling.make_labels(train_df, config)
-    eval_labels = labeling.make_labels(eval_df, config)
+    X_train_scaled = feature_engineering.transform(X_train_all[feat_cols], transformer)
+    X_train_scaled = X_train_scaled.copy()
+    X_train_scaled["symbol"] = X_train_all["symbol"]
 
-    # Align features and labels
-    train_idx = train_scaled.index.intersection(train_labels.index)
-    X_train = train_scaled.loc[train_idx].dropna()
-    y_train = train_labels.loc[X_train.index, "target"]
+    eval_scaled_by_sym: dict = {}
+    for sym, X_ev in eval_feats_by_sym.items():
+        ev_feat_cols = [c for c in X_ev.columns if c != "symbol"]
+        X_ev_scaled = feature_engineering.transform(X_ev[ev_feat_cols], transformer).copy()
+        X_ev_scaled["symbol"] = sym
+        eval_scaled_by_sym[sym] = X_ev_scaled
 
-    eval_idx = eval_scaled.index.intersection(eval_labels.index)
-    X_eval = eval_scaled.loc[eval_idx].dropna()
-    y_eval = eval_labels.loc[X_eval.index, "target"]
+    # Feature matrix for model (no symbol column)
+    X_train_model = X_train_scaled.drop(columns=["symbol"])
+    y_train_model = y_train_all.reindex(X_train_model.index).dropna()
+    X_train_model = X_train_model.loc[y_train_model.index]
 
-    dist = y_train.value_counts().sort_index().to_dict()
+    dist = y_train_model.value_counts().sort_index().to_dict()
     print(f"      Label distribution (train): {dist}")
-    print(f"      X_train={len(X_train)}  X_eval={len(X_eval)}")
+    print(f"      X_train={len(X_train_model)}  features={len(transformer.feature_cols)}")
 
-    # ── 4. Train model ────────────────────────────────────────────────────────
+    # Save dataset artifact (features + target + symbol)
+    ds = X_train_model.copy()
+    ds["target"] = y_train_model
+    ds["symbol"] = X_train_scaled.loc[ds.index, "symbol"]
+    dataset_path = os.path.join(config["paths"]["processed_data"], "dataset_v1.parquet")
+    ds.to_parquet(dataset_path)
+    print(f"      Dataset artifact → {dataset_path}")
+
+    # ── 4. CV splits + optional Optuna tuning + model training ────────────────
     cv_cfg = config["cross_validation"]
     cv_splits = list(
         cv_splitter.purged_walk_forward_cv(
-            X_train,
+            X_train_model,
             n_folds=cv_cfg["folds"],
             embargo_bars=cv_cfg["embargo_bars"],
         )
     )
 
     model_type = config["model"]["baseline"]
+    best_params: dict = {}
+    n_trials = config["model"].get("max_tuning_trials", 0)
+    if n_trials > 0:
+        print(f"\n[4a/7] Optuna tuning {model_type} ({n_trials} trials) ...")
+        best_params = model_training.tune_hyperparams(
+            X_train_model, y_train_model, cv_splits,
+            model_type=model_type, config=config,
+        )
+        print(f"       Best params: {best_params}")
+
     print(f"\n[4/7] Training {model_type} with {len(cv_splits)} CV folds ...")
     model, oof_preds = model_training.train(
-        X_train, y_train, cv_splits, model_type=model_type, config=config
+        X_train_model, y_train_model, cv_splits,
+        model_type=model_type, params=best_params, config=config,
     )
 
     model_path = os.path.join(config["paths"]["models"], f"model_{model_type}.pkl")
     model_training.save_model(model, model_path)
     print(f"      Model saved → {model_path}")
 
-    # Save dataset artifact
-    dataset_path = os.path.join(config["paths"]["processed_data"], "dataset_v1.parquet")
-    ds = X_train.copy()
-    ds["target"] = y_train
-    ds.to_parquet(dataset_path)
-    print(f"      Dataset artifact → {dataset_path}")
-
-    # ── 5. Signals ────────────────────────────────────────────────────────────
+    # ── 5. Signals + risk sizing per symbol ───────────────────────────────────
     print(f"\n[5/7] Generating signals on '{eval_split}' set ...")
-    eval_probs = model_training.predict_proba(model, X_eval)
-    signals = signal_generator.generate_signals(eval_probs, config)
-    sig_counts = signals["signal"].value_counts().sort_index().to_dict()
+    initial_equity = config["backtest"]["initial_equity"]
+    orders_by_sym: dict = {}
+
+    for sym in symbols:
+        X_ev = eval_scaled_by_sym[sym].drop(columns=["symbol"])
+        eval_probs = model_training.predict_proba(model, X_ev)
+        sigs = signal_generator.generate_signals(eval_probs, config)
+        sigs = sigs.copy()
+        sigs["symbol"] = sym
+
+        orders = risk_manager.size_positions(sigs, initial_equity, eval_ohlcv_by_sym[sym], config)
+        orders = orders.copy()
+        orders["symbol"] = sym
+        orders_by_sym[sym] = orders
+
+    sig_counts = (
+        pd.concat([orders_by_sym[s]["signal"] for s in symbols])
+        .value_counts()
+        .sort_index()
+        .to_dict()
+    )
     print(f"      Signal distribution: {sig_counts}")
 
+    all_signals = pd.concat(
+        [eval_scaled_by_sym[s][[]].assign(
+            signal=orders_by_sym[s]["signal"],
+            symbol=s,
+        ) for s in symbols]
+    )
     preds_path = os.path.join(config["paths"]["predictions"], f"signals_{eval_split}.parquet")
-    signals.to_parquet(preds_path)
+    all_signals.to_parquet(preds_path)
 
-    # ── 6. Risk sizing + backtest ──────────────────────────────────────────────
-    print("\n[6/7] Sizing positions and running backtest ...")
-    initial_equity = config["backtest"]["initial_equity"]
-    orders = risk_manager.size_positions(signals, initial_equity, eval_df, config)
-
-    trades, equity_curve = backtest_engine.run_backtest(eval_df, orders, config)
+    # ── 6. Multi-symbol backtest ───────────────────────────────────────────────
+    print("\n[6/7] Running multi-symbol backtest ...")
+    trades, equity_curve = backtest_engine.run_backtest(
+        eval_ohlcv_by_sym, orders_by_sym, config
+    )
     print(f"      Trades: {len(trades)}")
 
     # ── 7. Metrics + reporting ─────────────────────────────────────────────────
@@ -166,8 +239,8 @@ def run_pipeline(config_path: str = "config.yaml", eval_split: str = "val") -> d
     result = metrics.evaluate(equity_curve, trades)
     result["model_type"] = model_type
     result["eval_split"] = eval_split
-    result["n_train"] = len(X_train)
-    result["n_eval"] = len(X_eval)
+    result["n_symbols"] = len(symbols)
+    result["n_train"] = len(X_train_model)
     result["n_features"] = len(transformer.feature_cols)
 
     print("\n" + "=" * 40)

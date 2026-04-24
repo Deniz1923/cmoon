@@ -290,14 +290,13 @@ class TestBacktestEngine:
         )
         sigs = generate_signals(probs, config)
         orders = size_positions(sigs, 100_000, ohlcv, config)
-        trades, equity = run_backtest(ohlcv, orders, config)
+        trades, equity = run_backtest({"TEST": ohlcv}, {"TEST": orders}, config)
 
         if len(trades) > 0:
             for _, trade in trades.iterrows():
                 entry_ts = trade["entry_ts"]
                 entry_idx = ohlcv.index.get_loc(entry_ts)
                 if entry_idx > 0:
-                    # Entry price should be close to next bar's open ± slippage
                     expected_open = ohlcv.iloc[entry_idx]["open"]
                     slippage_factor = 1 + config["backtest"]["slippage_bps"] / 10_000
                     assert abs(trade["entry_price"] / (expected_open * slippage_factor) - 1) < 0.001
@@ -315,7 +314,7 @@ class TestBacktestEngine:
         )
         sigs = generate_signals(probs, config)
         orders = size_positions(sigs, 100_000, ohlcv, config)
-        _, equity = run_backtest(ohlcv, orders, config)
+        _, equity = run_backtest({"TEST": ohlcv}, {"TEST": orders}, config)
         assert not equity.isna().any(), "Equity curve contains NaN"
 
     def test_no_future_data_access(self):
@@ -336,16 +335,12 @@ class TestBacktestEngine:
         sigs = generate_signals(probs, config)
         orders = size_positions(sigs, 100_000, ohlcv, config)
 
-        # Full run
-        _, eq_full = run_backtest(ohlcv, orders, config)
-        # Trimmed run (drop last 50 bars)
-        cut_idx = ohlcv.index[-50]
-        _, eq_trim = run_backtest(ohlcv.iloc[:-50], orders, config)
+        _, eq_full = run_backtest({"TEST": ohlcv}, {"TEST": orders}, config)
+        _, eq_trim = run_backtest({"TEST": ohlcv.iloc[:-50]}, {"TEST": orders}, config)
 
         shared = eq_full.index.intersection(eq_trim.index)
         if len(shared) > 0:
             diff = (eq_full.loc[shared] - eq_trim.loc[shared]).abs().max()
-            # Allow small float differences but no large systematic divergence
             assert diff < 1.0, f"Equity diverges between full and trimmed run — possible look-ahead: {diff}"
 
 

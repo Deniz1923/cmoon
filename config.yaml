@@ -94,7 +94,7 @@ model:
 
 signals:
   long_threshold: 0.60
-  short_threshold: 0.40
+  short_threshold: 0.60
 
 risk:
   target_annual_volatility: 0.15

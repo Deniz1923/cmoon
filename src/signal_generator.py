@@ -38,16 +38,13 @@ def generate_signals(probs_df: pd.DataFrame, config: dict) -> pd.DataFrame:
         confidence[long_mask] = probs_df.loc[long_mask, 1]
 
     if -1 in probs_df.columns:
-        # short threshold: p(short) must exceed (1 - short_thresh) to avoid being
-        # too trigger-happy with the symmetric threshold convention
-        short_prob_thresh = 1.0 - short_thresh
-        short_mask = probs_df[-1] >= short_prob_thresh
+        short_mask = probs_df[-1] >= short_thresh
         signal[short_mask] = -1
         confidence[short_mask] = probs_df.loc[short_mask, -1]
 
     # Resolve conflicts: if both long and short thresholds triggered → go flat
     if 1 in probs_df.columns and -1 in probs_df.columns:
-        conflict = (probs_df[1] >= long_thresh) & (probs_df[-1] >= (1.0 - short_thresh))
+        conflict = (probs_df[1] >= long_thresh) & (probs_df[-1] >= short_thresh)
         signal[conflict] = 0
         confidence[conflict] = 0.0
 

@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import RobustScaler
 
+from src.utils import atr as _atr
+
 
 @dataclass
 class FeatureTransformer:
@@ -168,13 +170,6 @@ def _stochastic(high, low, close, k_period=14, d_period=3):
     high_k = high.rolling(k_period).max()
     k = 100 * (close - low_k) / (high_k - low_k + 1e-9)
     return k, k.rolling(d_period).mean()
-
-
-def _atr(high, low, close, period=14) -> pd.Series:
-    tr = pd.concat(
-        [high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1
-    ).max(axis=1)
-    return tr.ewm(com=period - 1, adjust=False).mean()
 
 
 def _obv(close: pd.Series, volume: pd.Series) -> pd.Series:

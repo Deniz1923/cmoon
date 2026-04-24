@@ -11,6 +11,8 @@ Baseline rules:
 import numpy as np
 import pandas as pd
 
+from src.utils import atr as _atr
+
 
 def size_positions(
     signals: pd.DataFrame,
@@ -102,13 +104,6 @@ def apply_kill_switch(equity_curve: pd.Series, config: dict) -> bool:
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
-
-def _atr(high, low, close, period=14) -> pd.Series:
-    tr = pd.concat(
-        [high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1
-    ).max(axis=1)
-    return tr.ewm(com=period - 1, adjust=False).mean()
-
 
 def _realized_vol_annual(close: pd.Series, window: int = 24) -> pd.Series:
     log_ret = np.log(close / close.shift(1))
