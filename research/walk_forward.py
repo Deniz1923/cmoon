@@ -15,9 +15,8 @@ from cnlib import backtest
 from cnlib.base_strategy import BaseStrategy
 
 # Sacred holdout — do not tune against this window
-TRAIN_END   = 1100
-TEST_START  = 1100
-TOTAL_CANDLES = 1570  # TODO: confirm this matches actual dataset length
+TRAIN_END  = 1100
+TEST_START = 1100
 
 
 @dataclass
@@ -62,7 +61,7 @@ def holdout_test(
         train_start=0,
         train_end=TRAIN_END - 1,
         test_start=TEST_START,
-        test_end=TOTAL_CANDLES - 1,
+        test_end=TEST_START + result.total_candles - 1,
         return_pct=result.return_pct,
         total_liquidations=result.total_liquidations,
         validation_errors=result.validation_errors,
@@ -75,33 +74,48 @@ def walk_forward(
     initial_capital: float = 3000.0,
 ) -> list[SplitResult]:
     """
-    Walk-forward cross-validation on the TRAIN window only (0–1099).
+    Walk-forward cross-validation on the TRAIN window only (candles 0–1099).
 
-    Splits the train window into n expanding folds. Each fold:
-      - train on all prior candles
-      - test on the next chunk
+    Splits the train window into n equal folds. Each fold runs from test_start
+    but metrics are extracted only for [test_start, test_end] — the engine has
+    no end_candle parameter, so we slice portfolio_series to avoid contaminating
+    fold results with holdout candles (1100–1569).
 
-    This catches if your strategy only works in a specific regime.
-
-    TODO: for ML strategies, you'll need to re-train the model inside each fold.
-          Add a `retrain_hook` callback parameter if needed.
+    TODO: for ML strategies, pass a retrain_hook(train_end_candle) callback
+          that re-trains the model before each fold's test window.
     """
-    train_window = TRAIN_END
-    fold_size = train_window // (n_splits + 1)
+    fold_size = TRAIN_END // (n_splits + 1)
 
     results = []
     for i in range(n_splits):
         test_start = fold_size * (i + 1)
-        test_end   = test_start + fold_size
+        test_end   = min(test_start + fold_size - 1, TRAIN_END - 1)
 
-        # TODO: for ML strategies — retrain model on candles 0..test_start before each fold
+        # TODO: for ML strategies — call retrain_hook(test_start) here
 
-        strategy = strategy_cls()  # fresh instance per fold
+        strategy = strategy_cls()
         result = backtest.run(
             strategy,
             initial_capital=initial_capital,
             start_candle=test_start,
             silent=True,
+        )
+
+        # Slice to fold window only — prevents holdout contamination
+        series = result.portfolio_dataframe()
+        fold_rows = series[series["candle_index"] <= test_end]
+
+        if fold_rows.empty:
+            continue
+
+        start_val  = fold_rows["portfolio_value"].iloc[0]
+        end_val    = fold_rows["portfolio_value"].iloc[-1]
+        fold_return = (end_val / start_val - 1) * 100
+
+        fold_liq = sum(
+            len(t["liquidated"])
+            for t in result.trade_history
+            if t["candle_index"] <= test_end
         )
 
         sr = SplitResult(
@@ -110,8 +124,8 @@ def walk_forward(
             train_end=test_start - 1,
             test_start=test_start,
             test_end=test_end,
-            return_pct=result.return_pct,
-            total_liquidations=result.total_liquidations,
+            return_pct=fold_return,
+            total_liquidations=fold_liq,
             validation_errors=result.validation_errors,
         )
         results.append(sr)
