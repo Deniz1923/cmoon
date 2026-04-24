@@ -14,6 +14,21 @@ import numpy as np
 import pandas as pd
 
 from cnlib.base_strategy import BaseStrategy
+from research.features import (
+    atr as _atr,
+    atr_pct as _atr_pct,
+    bb_width as _bb_width,
+    bb_pct as _bb_pct,
+    ema as _ema,
+    rsi as _rsi,
+)
+from research.ml_features import build_features_single as _build_features_single
+from research.risk import (
+    dynamic_leverage as _dynamic_leverage,
+    stop_loss_price as _stop_loss_price,
+    take_profit_price as _take_profit_price,
+    position_allocation as _position_allocation,
+)
 
 COINS = ["kapcoin-usd_train", "metucoin-usd_train", "tamcoin-usd_train"]
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -22,9 +37,6 @@ MIN_FEATURE_ROWS = 55
 TARGET_HORIZON = 3
 MAX_ACTIVE_COINS = 2
 MAX_TOTAL_ALLOCATION = 0.9
-
-ML_CONFIDENCE_THRESHOLD = 0.60
-ML_STRONG_THRESHOLD = 0.80
 ATR_PERIOD = 14
 
 
@@ -33,6 +45,12 @@ def _flat(coin: str) -> dict:
 
 
 class MyStrategy(BaseStrategy):
+    # Confidence threshold: 0.55 selected via 4-fold walk-forward CV on
+    # training window (candles 0-1099). Best avg return (+39.6%) with
+    # lowest coefficient of variation and 21.5 trades/fold (not too sparse).
+    ML_CONFIDENCE_THRESHOLD: float = 0.55
+    ML_STRONG_THRESHOLD: float = 0.80
+
     def __init__(self):
         super().__init__()
         self._open_signals: dict[str, int] = {coin: 0 for coin in COINS}
@@ -64,7 +82,7 @@ class MyStrategy(BaseStrategy):
         n_active = len(active)
 
         for candidate in active:
-            strength = 1.0 if candidate["confidence"] >= ML_STRONG_THRESHOLD else 0.5
+            strength = 1.0 if candidate["confidence"] >= self.__class__.ML_STRONG_THRESHOLD else 0.5
             decision = candidate["decision"]
             decision["allocation"] = _position_allocation(n_active, strength)
             decisions[decision["coin"]] = decision
@@ -116,7 +134,8 @@ class MyStrategy(BaseStrategy):
             try:
                 with open(path, "rb") as f:
                     payload = pickle.load(f)
-            except (OSError, pickle.PickleError, AttributeError, ImportError, EOFError):
+            except (OSError, pickle.PickleError, AttributeError, ImportError, EOFError) as exc:
+                print(f"[MyStrategy] WARNING: failed to load model for {coin}: {type(exc).__name__}: {exc}")
                 continue
 
             if isinstance(payload, dict) and "estimator" in payload:
@@ -175,11 +194,6 @@ class MyStrategy(BaseStrategy):
             return None
         return row.to_numpy(dtype=np.float32)
 
-    def _feature_names(self, data: dict, coin: str) -> list[str]:
-        df = data[coin]
-        leader = data["kapcoin-usd_train"]["Close"] if coin != "kapcoin-usd_train" else None
-        return list(_build_features_single(df, leader_close=leader).columns)
-
     def _candidate_decision(
         self,
         coin: str,
@@ -195,7 +209,7 @@ class MyStrategy(BaseStrategy):
 
         ml_signal = 1 if ml_prob_up > 0.5 else -1 if ml_prob_up < 0.5 else 0
         confidence = abs(ml_prob_up - 0.5) * 2.0
-        if ml_signal != rule_signal or confidence < ML_CONFIDENCE_THRESHOLD:
+        if ml_signal != rule_signal or confidence < self.__class__.ML_CONFIDENCE_THRESHOLD:
             return None
 
         current_atr = _atr(df, ATR_PERIOD).iloc[-1]
@@ -204,12 +218,13 @@ class MyStrategy(BaseStrategy):
             return None
 
         entry = float(df["Close"].iloc[-1])
+        lev = _dynamic_leverage(float(current_atr_pct))
         decision = {
             "coin": coin,
             "signal": rule_signal,
             "allocation": 0.0,
-            "leverage": _dynamic_leverage(float(current_atr_pct)),
-            "stop_loss": _stop_loss_price(entry, rule_signal, float(current_atr)),
+            "leverage": lev,
+            "stop_loss": _stop_loss_price(entry, rule_signal, float(current_atr), leverage=lev),
             "take_profit": _take_profit_price(entry, rule_signal, float(current_atr)),
         }
         return {"decision": decision, "confidence": confidence}
@@ -217,155 +232,3 @@ class MyStrategy(BaseStrategy):
 
 def _model_path(coin: str) -> Path:
     return RESULTS_DIR / f"model_{coin.replace('-', '_')}.pkl"
-
-
-def _ema(series: pd.Series, n: int) -> pd.Series:
-    return series.ewm(span=n, adjust=False).mean()
-
-
-def _sma(series: pd.Series, n: int) -> pd.Series:
-    return series.rolling(n).mean()
-
-
-def _true_range(df: pd.DataFrame) -> pd.Series:
-    prev_close = df["Close"].shift(1)
-    ranges = pd.concat([
-        df["High"] - df["Low"],
-        (df["High"] - prev_close).abs(),
-        (df["Low"] - prev_close).abs(),
-    ], axis=1)
-    return ranges.max(axis=1)
-
-
-def _atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
-    return _true_range(df).ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
-
-
-def _atr_pct(df: pd.DataFrame, n: int = 14) -> pd.Series:
-    close = df["Close"].replace(0, np.nan)
-    return _atr(df, n) / close
-
-
-def _bb_bands(series: pd.Series, n: int = 20, k: float = 2.0):
-    mid = _sma(series, n)
-    std = series.rolling(n).std(ddof=0)
-    upper = mid + k * std
-    lower = mid - k * std
-    return upper, mid, lower
-
-
-def _bb_width(series: pd.Series, n: int = 20, k: float = 2.0) -> pd.Series:
-    upper, mid, lower = _bb_bands(series, n, k)
-    return (upper - lower) / mid.replace(0, np.nan)
-
-
-def _bb_pct(series: pd.Series, n: int = 20, k: float = 2.0) -> pd.Series:
-    upper, _, lower = _bb_bands(series, n, k)
-    width = (upper - lower).replace(0, np.nan)
-    return (series - lower) / width
-
-
-def _rsi(series: pd.Series, n: int = 14) -> pd.Series:
-    delta = series.diff()
-    gains = delta.clip(lower=0)
-    losses = (-delta).clip(lower=0)
-    avg_gain = gains.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
-    avg_loss = losses.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    result = 100 - (100 / (1 + rs))
-    result = result.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
-    result = result.mask((avg_gain == 0) & (avg_loss > 0), 0.0)
-    result = result.mask((avg_gain == 0) & (avg_loss == 0), 50.0)
-    return result
-
-
-def _momentum(series: pd.Series, n: int = 10) -> pd.Series:
-    return series.pct_change(n)
-
-
-def _volume_ratio(df: pd.DataFrame, n: int = 20) -> pd.Series:
-    avg_volume = df["Volume"].rolling(n).mean().replace(0, np.nan)
-    return df["Volume"] / avg_volume
-
-
-def _rolling_correlation(a: pd.Series, b: pd.Series, n: int = 30) -> pd.Series:
-    return a.pct_change().rolling(n).corr(b.pct_change())
-
-
-def _lead_lag_signal(leader: pd.Series, follower: pd.Series, lag: int = 1) -> pd.Series:
-    return leader.pct_change().shift(lag).reindex(follower.index)
-
-
-def _build_features_single(
-    df: pd.DataFrame,
-    leader_close: pd.Series | None = None,
-) -> pd.DataFrame:
-    close = df["Close"]
-    feat = pd.DataFrame(index=df.index)
-
-    feat["ret_1"] = close.pct_change(1)
-    feat["ret_3"] = close.pct_change(3)
-    feat["ret_5"] = close.pct_change(5)
-    feat["ret_10"] = close.pct_change(10)
-    feat["ret_20"] = close.pct_change(20)
-
-    ema_20 = _ema(close, 20)
-    ema_50 = _ema(close, 50)
-    feat["ema_diff_20_50"] = (ema_20 - ema_50) / close
-    feat["close_vs_ema_20"] = (close - ema_20) / close
-    feat["close_vs_ema_50"] = (close - ema_50) / close
-
-    feat["rsi_14"] = _rsi(close, 14)
-    feat["bb_pct_20"] = _bb_pct(close, 20)
-    feat["bb_width_20"] = _bb_width(close, 20)
-    feat["mom_10"] = _momentum(close, 10)
-
-    feat["atr_pct_14"] = _atr_pct(df, 14)
-    feat["vol_ratio_20"] = _volume_ratio(df, 20)
-
-    if leader_close is not None:
-        feat["leader_ret_1"] = _lead_lag_signal(leader_close, close, lag=1)
-        feat["leader_ret_3"] = _lead_lag_signal(leader_close, close, lag=3)
-        feat["leader_corr_30"] = _rolling_correlation(leader_close, close, n=30)
-
-    return feat
-
-
-def _dynamic_leverage(current_atr_pct: float) -> int:
-    if current_atr_pct < 0.03:
-        return 5
-    if current_atr_pct < 0.06:
-        return 3
-    if current_atr_pct < 0.10:
-        return 2
-    return 1
-
-
-def _stop_loss_price(
-    entry: float,
-    direction: int,
-    current_atr: float,
-    atr_multiplier: float = 2.0,
-) -> float:
-    return entry - direction * current_atr * atr_multiplier
-
-
-def _take_profit_price(
-    entry: float,
-    direction: int,
-    current_atr: float,
-    risk_reward: float = 2.0,
-    atr_multiplier: float = 2.0,
-) -> float:
-    return entry + direction * current_atr * atr_multiplier * risk_reward
-
-
-def _position_allocation(
-    n_active_coins: int,
-    signal_strength: float = 1.0,
-    max_total: float = MAX_TOTAL_ALLOCATION,
-) -> float:
-    if n_active_coins <= 0:
-        return 0.0
-    base = max_total / n_active_coins
-    return round(min(base * signal_strength, base), 4)

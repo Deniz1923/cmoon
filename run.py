@@ -42,7 +42,6 @@ STRATEGIES: dict[str, StrategyFactory] = {
     "main": _main_strategy,
     "trend": _trend_strategy,
     "meanrevert": _mean_revert_strategy,
-    "ensemble": _main_strategy,
 }
 
 
