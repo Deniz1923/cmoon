@@ -7,7 +7,7 @@ Leveraged long/short backtest strategy for the [Code Night](https://github.com/I
 ```bash
 git clone <repo-url>
 cd cmoon
-.venv/bin/python -m pip install cnlib
+uv sync
 ```
 
 ## Running a backtest
@@ -26,7 +26,7 @@ cd cmoon
 
 | Flag | Default | Description |
 |---|---|---|
-| `--strategy` | `main` | `main`, `trend`, `meanrevert`; `ensemble` is reserved until Person 3 wires it |
+| `--strategy` | `main` | `main`, `ensemble`, `trend`, `meanrevert` |
 | `--start` | `0` | First candle to run, inclusive |
 | `--end` | last candle | Last candle to run, inclusive |
 | `--capital` | `3000` | Starting capital |
@@ -36,9 +36,9 @@ cd cmoon
 | `--silent` | off | Suppress per-candle progress output |
 
 `run.py` uses the same bounded backtest helper as walk-forward validation, so
-`--start 10 --end 20` runs exactly 11 candles. The `ensemble` name is kept in
-the registry as a reserved placeholder, but selecting it exits cleanly until
-the ensemble implementation exists.
+`--start 10 --end 20` runs exactly 11 candles. `main` and `ensemble` both use
+the final `MyStrategy` path; until Person 2 implements the rule signal hook,
+that path is runnable-flat.
 
 ## cnlib 0.1.4 compatibility
 
@@ -74,14 +74,13 @@ ML models must be trained once before running the ensemble strategy:
 
 ```bash
 .venv/bin/python research/train_models.py
-# → saves models to results/model_*.pkl
+# → saves model bundles to results/model_*.pkl
 # → saves results/feature_importance.csv
 ```
 
-Person 3 note: before relying on `research/train_models.py`, update its
-`load_all_data()` helper to return full history from `_full_data`, not
-`coin_data`. Otherwise model training under `cnlib` 0.1.4 can see only the
-initial sliced candle.
+`research/train_models.py` returns full history from `_full_data` under
+`cnlib` 0.1.4, splits by original candle index, and saves bundled metadata next
+to each estimator for inference.
 
 ## Project structure
 
@@ -102,7 +101,7 @@ cmoon/
 │   └── walk_forward.py           # Validation: walk-forward + holdout test
 │
 └── results/                      # Generated — gitignored
-    ├── model_*.pkl               # Trained model files
+    ├── model_*.pkl               # Trained model bundles
     ├── feature_importance.csv    # Feature importance from train_models.py
     └── *_equity.png              # Equity curve plots from --plot
 ```
@@ -180,9 +179,10 @@ slicing results afterward. Future ML workflows can pass
 .venv/bin/python -B -m unittest discover -s tests
 ```
 
-The test suite covers Person 1 infrastructure: indicators, bounded backtest
-windows, strategy registry behavior, walk-forward fold bounds, holdout starts,
-and CLI smoke behavior.
+The test suite covers Person 1 infrastructure plus Person 3 ensemble plumbing:
+indicators, bounded backtest windows, strategy registry behavior, walk-forward
+fold bounds, holdout starts, ML feature-order contracts, ensemble gating, and
+CLI smoke behavior.
 
 ## Team responsibilities
 

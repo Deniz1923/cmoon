@@ -17,9 +17,9 @@ from research.risk import dynamic_leverage, stop_loss_price, take_profit_price, 
 # Thresholds — tune these via walk_forward.py, NOT against holdout
 # ---------------------------------------------------------------------------
 
-ML_CONFIDENCE_THRESHOLD = 0.60   # TODO: try 0.55, 0.60, 0.65, 0.70
+ML_CONFIDENCE_THRESHOLD = 0.60   # baseline walk-forward threshold
                                   # Higher = fewer trades, higher precision
-ML_STRONG_THRESHOLD = 0.80       # TODO: above this → full allocation
+ML_STRONG_THRESHOLD = 0.80       # above this -> full allocation
                                   # Below this but above base → half allocation
 
 ATR_PERIOD = 14
@@ -30,6 +30,7 @@ def combine(
     df: pd.DataFrame,
     trend_signal: int,
     ml_prob_up: float,
+    n_active_coins: int = 2,
 ) -> dict:
     """
     Combine a rule-based signal and ML probability into a final decision.
@@ -37,20 +38,24 @@ def combine(
     trend_signal : +1, -1, or 0 from TrendStrategy or MeanRevertStrategy
     ml_prob_up   : probability that price goes UP (from model.predict_proba)
                    maps to: > 0.5 = ML thinks bullish, < 0.5 = ML thinks bearish
+    n_active_coins: number of positions being opened this candle, used for
+                    allocation sizing.
 
     Returns a complete decision dict ready to include in predict()'s return list.
 
-    TODO: consider adding a third input — current portfolio exposure —
-          to avoid stacking too many correlated positions.
+    Callers should rank agreed signals and pass no more than the intended
+    number of active positions into the portfolio.
     """
     close = df["Close"].iloc[-1]
 
     # No rule-based signal → don't trade regardless of ML
     if trend_signal == 0:
         return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
+    if not 0.0 <= ml_prob_up <= 1.0:
+        return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
 
     # ML direction: +1 if prob_up > 0.5, -1 if prob_up < 0.5
-    ml_signal = 1 if ml_prob_up > 0.5 else -1
+    ml_signal = 1 if ml_prob_up > 0.5 else -1 if ml_prob_up < 0.5 else 0
     ml_confidence = abs(ml_prob_up - 0.5) * 2  # rescale to [0, 1]
 
     # Agreement gate
@@ -75,7 +80,7 @@ def combine(
         alloc_strength = 1.0
     else:
         alloc_strength = 0.5
-    alloc = position_allocation(n_active_coins=2, signal_strength=alloc_strength)
+    alloc = position_allocation(n_active_coins=n_active_coins, signal_strength=alloc_strength)
 
     return {
         "coin": coin,
