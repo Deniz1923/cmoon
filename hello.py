@@ -1,6 +1,5 @@
-def main():
-    print("Hello from cmoon!")
+from cnlib import backtest
+from strategy import MyStrategy
 
-
-if __name__ == "__main__":
-    main()
+result = backtest.run(MyStrategy(), initial_capital=3000.0)
+result.print_summary()
