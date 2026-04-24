@@ -1,7 +1,7 @@
 """
 Train and persist ML models - Person 3.
 
-Run this script once offline to produce saved model bundles.
+Run this script offline to produce saved model bundles.
 The final strategy.py loads these at __init__ time, not in predict().
 """
 from __future__ import annotations
@@ -30,8 +30,9 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-RESULTS_DIR = Path(__file__).parent.parent / "results"
-RESULTS_DIR.mkdir(exist_ok=True)
+MODEL_DIR = ROOT_DIR / "models"
+RESULTS_DIR = ROOT_DIR / "results"
+MODEL_DIR.mkdir(exist_ok=True)
 
 MODEL_FORMAT_VERSION = 1
 TRAIN_END_CANDLE = 1100
@@ -59,7 +60,12 @@ def split_train_holdout(
     valid_index: pd.Index,
     train_end_candle: int = TRAIN_END_CANDLE,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.Index, pd.Index]:
-    """Split by original candle index, not by post-feature row count."""
+    """
+    Split by original candle index, not by post-feature row count.
+
+    Training rows are purged by TARGET_HORIZON so labels never reach into the
+    holdout window. Rows in the purge gap are excluded from both splits.
+    """
     index = pd.Index(valid_index)
     if len(X) != len(y) or len(X) != len(index):
         raise ValueError(
@@ -70,8 +76,8 @@ def split_train_holdout(
         raise ValueError("valid_index must contain numeric candle indices")
 
     candle_index = index.to_numpy()
-    train_mask = candle_index < train_end_candle
-    holdout_mask = ~train_mask
+    train_mask = candle_index + TARGET_HORIZON < train_end_candle
+    holdout_mask = candle_index >= train_end_candle
     return (
         X[train_mask],
         y[train_mask],
@@ -189,7 +195,7 @@ def _print_metrics(label: str, metrics: dict) -> None:
 
 
 def model_path(coin: str) -> Path:
-    return RESULTS_DIR / f"model_{coin.replace('-', '_')}.pkl"
+    return MODEL_DIR / f"model_{coin.replace('-', '_')}.pkl"
 
 
 def save_model(
@@ -211,6 +217,7 @@ def save_model(
         "metrics": metrics or {},
     }
     path = model_path(coin)
+    path.parent.mkdir(exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump(bundle, f)
     print(f"  Saved model bundle -> {path}")
@@ -251,6 +258,7 @@ def save_feature_importance(models: dict[str, object], coin_data: dict) -> None:
         df = df.sort_values("importance", ascending=False, na_position="last")
 
     path = RESULTS_DIR / "feature_importance.csv"
+    path.parent.mkdir(exist_ok=True)
     df.to_csv(path, index=False)
     print(f"\nFeature importance -> {path}")
     if not df.empty:
