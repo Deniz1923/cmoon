@@ -36,9 +36,8 @@ uv sync
 | `--silent` | off | Suppress per-candle progress output |
 
 `run.py` uses the same bounded backtest helper as walk-forward validation, so
-`--start 10 --end 20` runs exactly 11 candles. `main` and `ensemble` both use
-the final `MyStrategy` path; until Person 2 implements the rule signal hook,
-that path is runnable-flat.
+`--start 10 --end 20` runs exactly 11 candles. `main` uses the final
+`MyStrategy` path and loads its tracked model bundles from `models/`.
 
 ## cnlib 0.1.4 compatibility
 
@@ -70,17 +69,21 @@ coin_data = loader._full_data  # full 1570-candle history in cnlib 0.1.4
 
 ## Training ML models
 
-ML models must be trained once before running the ensemble strategy:
+Tracked ML model bundles live in `models/` and are loaded by `strategy.py` at
+startup. Regenerate them after changing features, labels, model parameters, or
+the train/holdout split:
 
 ```bash
 .venv/bin/python research/train_models.py
-# → saves model bundles to results/model_*.pkl
+# → saves model bundles to models/model_*.pkl
 # → saves results/feature_importance.csv
 ```
 
 `research/train_models.py` returns full history from `_full_data` under
-`cnlib` 0.1.4, splits by original candle index, and saves bundled metadata next
-to each estimator for inference.
+`cnlib` 0.1.4, splits by original candle index, purges the target-horizon gap
+before holdout, and saves bundled metadata next to each estimator for
+inference. `results/` is generated and gitignored; `models/` contains the
+portable inference artifacts.
 
 ## Project structure
 
@@ -88,6 +91,8 @@ to each estimator for inference.
 cmoon/
 ├── strategy.py                   # Submission file — final ensemble
 ├── run.py                        # Backtest runner (see usage above)
+├── models/                       # Tracked model bundles used by strategy.py
+│   └── model_*.pkl
 │
 ├── research/
 │   ├── features.py               # Shared indicator library (EMA, ATR, RSI, BB, …)
@@ -96,12 +101,11 @@ cmoon/
 │   ├── trend_strategy.py         # EMA crossover strategy (trending regime)
 │   ├── mean_revert_strategy.py   # RSI + Bollinger Bands (ranging regime)
 │   ├── ml_features.py            # Feature matrix builder for ML models
-│   ├── train_models.py           # Train and save models to results/
+│   ├── train_models.py           # Train models to models/, reports to results/
 │   ├── ensemble.py               # Combines trend signal + ML probability
 │   └── walk_forward.py           # Validation: walk-forward + holdout test
 │
-└── results/                      # Generated — gitignored
-    ├── model_*.pkl               # Trained model bundles
+└── results/                      # Generated reports/plots — gitignored
     ├── feature_importance.csv    # Feature importance from train_models.py
     └── *_equity.png              # Equity curve plots from --plot
 ```

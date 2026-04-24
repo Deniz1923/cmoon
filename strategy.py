@@ -1,9 +1,8 @@
 """
 Final submission strategy.
 
-Person 3's ML/ensemble plumbing is complete here. Person 2 only needs to
-replace _rule_signal() with the rule-based trend/mean-reversion signal.
-Until then, the strategy is intentionally runnable-flat.
+Loads tracked ML model bundles from models/ and combines them with the
+rule-based trend/mean-reversion signal.
 """
 from __future__ import annotations
 
@@ -32,7 +31,7 @@ from research.risk import (
 )
 
 COINS = ["kapcoin-usd_train", "metucoin-usd_train", "tamcoin-usd_train"]
-RESULTS_DIR = Path(__file__).parent / "results"
+MODEL_DIR = Path(__file__).parent / "models"
 
 MIN_FEATURE_ROWS = 55
 TARGET_HORIZON = 3
@@ -268,4 +267,4 @@ class MyStrategy(BaseStrategy):
 
 
 def _model_path(coin: str) -> Path:
-    return RESULTS_DIR / f"model_{coin.replace('-', '_')}.pkl"
+    return MODEL_DIR / f"model_{coin.replace('-', '_')}.pkl"
