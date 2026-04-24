@@ -48,7 +48,7 @@ def load_all_data() -> dict[str, pd.DataFrame]:
             return []
     s = _Loader()
     s.get_data()
-    return s.coin_data
+    return {coin: df.copy() for coin, df in s._full_data.items()}
 
 
 def train_coin_model(
