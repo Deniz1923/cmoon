@@ -54,11 +54,10 @@ DATASET_PRESETS: dict[str, Path | None] = {
 
 
 def get_strategy(name: str):
-    factory = STRATEGIES.get(name)
     if name not in STRATEGIES:
         available = ", ".join(STRATEGIES)
         raise ValueError(f"Unknown strategy '{name}'. Available: {available}")
-    return factory()
+    return STRATEGIES[name]()
 
 
 def resolve_data_dir(dataset: str, data_dir: Path | None) -> Path | None:
