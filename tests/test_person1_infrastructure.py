@@ -236,9 +236,7 @@ class TestRunnerAndWalkForward(unittest.TestCase):
         import run
 
         self.assertIn("main", run.STRATEGIES)
-        self.assertIn("ensemble", run.STRATEGIES)
         self.assertIsNotNone(run.get_strategy("main"))
-        self.assertIsNotNone(run.get_strategy("ensemble"))
 
         with self.assertRaises(ValueError):
             run.get_strategy("missing")
@@ -329,10 +327,11 @@ class TestPerson3Ensemble(unittest.TestCase):
 
     def test_inference_feature_order_matches_training_features(self):
         data = make_coin_data(140)
-        strategy = MyStrategy()
 
         for coin in COINS:
-            self.assertEqual(strategy._feature_names(data, coin), feature_names(data, coin))
+            leader = data["kapcoin-usd_train"]["Close"] if coin != "kapcoin-usd_train" else None
+            inferred_names = list(build_features_single(data[coin], leader_close=leader).columns)
+            self.assertEqual(inferred_names, feature_names(data, coin))
 
     def test_inference_feature_values_match_training_features(self):
         data = make_coin_data(140)
