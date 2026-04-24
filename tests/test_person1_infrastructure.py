@@ -17,6 +17,7 @@ from cnlib.validator import validate
 from research import features
 from research.backtest_window import run_backtest_window
 from research.ml_features import (
+    TARGET_HORIZON,
     build_X_y,
     build_features_single,
     feature_names,
@@ -319,7 +320,7 @@ class AlwaysLongStrategy(MyStrategy):
 class TestPerson3Ensemble(unittest.TestCase):
     def test_missing_model_artifacts_return_valid_flat_decisions(self):
         with TemporaryDirectory() as tmp:
-            with patch("strategy.RESULTS_DIR", Path(tmp)):
+            with patch("strategy.MODEL_DIR", Path(tmp)):
                 strategy = MyStrategy()
 
         decisions = strategy.predict(make_coin_data(140))
@@ -365,7 +366,7 @@ class TestPerson3Ensemble(unittest.TestCase):
         data["kapcoin-usd_train"].loc[last, ["Open", "High", "Low", "Close"]] = 0.0
 
         with TemporaryDirectory() as tmp:
-            with patch("strategy.RESULTS_DIR", Path(tmp)):
+            with patch("strategy.MODEL_DIR", Path(tmp)):
                 strategy = MyStrategy()
 
         self.assertIsNone(strategy._ml_feature_row("kapcoin-usd_train", data))
@@ -378,9 +379,20 @@ class TestPerson3Ensemble(unittest.TestCase):
         self.assertEqual(len(valid_index), 0)
 
     def test_train_holdout_split_uses_candle_index_not_row_count(self):
-        X = np.arange(20, dtype=np.float32).reshape(5, 4)
-        y = np.array([0, 1, 0, 1, 1])
-        valid_index = pd.Index([100, TRAIN_END_CANDLE - 1, TRAIN_END_CANDLE, 1200, 1300])
+        self.assertEqual(TRAIN_END_CANDLE - TARGET_HORIZON, 1097)
+
+        X = np.arange(32, dtype=np.float32).reshape(8, 4)
+        y = np.array([0, 1, 0, 1, 1, 0, 1, 0])
+        valid_index = pd.Index([
+            100,
+            TRAIN_END_CANDLE - TARGET_HORIZON - 1,
+            TRAIN_END_CANDLE - TARGET_HORIZON,
+            TRAIN_END_CANDLE - 1,
+            TRAIN_END_CANDLE,
+            1200,
+            1300,
+            1400,
+        ])
 
         X_train, y_train, X_test, y_test, train_index, test_index = split_train_holdout(
             X,
@@ -388,12 +400,13 @@ class TestPerson3Ensemble(unittest.TestCase):
             valid_index,
         )
 
-        self.assertEqual(list(train_index), [100, TRAIN_END_CANDLE - 1])
-        self.assertEqual(list(test_index), [TRAIN_END_CANDLE, 1200, 1300])
+        self.assertEqual(list(train_index), [100, TRAIN_END_CANDLE - TARGET_HORIZON - 1])
+        self.assertEqual(list(test_index), [TRAIN_END_CANDLE, 1200, 1300, 1400])
+        self.assertNotIn(TRAIN_END_CANDLE - TARGET_HORIZON, train_index)
         self.assertEqual(len(X_train), 2)
         self.assertEqual(len(y_train), 2)
-        self.assertEqual(len(X_test), 3)
-        self.assertEqual(len(y_test), 3)
+        self.assertEqual(len(X_test), 4)
+        self.assertEqual(len(y_test), 4)
 
 
 if __name__ == "__main__":
