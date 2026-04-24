@@ -287,9 +287,10 @@ class TestRunnerAndWalkForward(unittest.TestCase):
         self.assertEqual(strategy.calls[-1], TEST_START + 9)
 
     def test_cli_smoke_accepts_end_candle(self):
+        project_root = Path(__file__).resolve().parent.parent
         completed = subprocess.run(
             [sys.executable, "-B", "run.py", "--silent", "--end", "5"],
-            cwd="/home/deniz/cmoon",
+            cwd=project_root,
             text=True,
             capture_output=True,
             check=False,

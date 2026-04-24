@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from cnlib.base_strategy import BaseStrategy
+from research.ensemble_model import EnsembleModel as _EnsembleModel  # noqa: F401 — pickle deserialization
 from research.features import (
     atr as _atr,
     atr_pct as _atr_pct,
@@ -255,14 +256,24 @@ class MyStrategy(BaseStrategy):
             risk_reward = 1.5  # ranging — mean-revert targets are smaller
 
         entry = float(df["Close"].iloc[-1])
+        if entry <= 0:
+            return None
+
         lev = _dynamic_leverage(float(current_atr_pct))
+        stop_loss = _stop_loss_price(entry, rule_signal, float(current_atr), leverage=lev)
+        take_profit = _take_profit_price(entry, rule_signal, float(current_atr), risk_reward=risk_reward)
+
+        # Sanity check: both prices must be positive (ATR too large relative to entry otherwise)
+        if stop_loss <= 0 or take_profit <= 0:
+            return None
+
         decision = {
             "coin": coin,
             "signal": rule_signal,
             "allocation": 0.0,
             "leverage": lev,
-            "stop_loss": _stop_loss_price(entry, rule_signal, float(current_atr), leverage=lev),
-            "take_profit": _take_profit_price(entry, rule_signal, float(current_atr), risk_reward=risk_reward),
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
         }
         return {"decision": decision, "confidence": confidence}
 

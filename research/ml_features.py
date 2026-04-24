@@ -67,6 +67,17 @@ def build_features_single(df: pd.DataFrame, leader_close: pd.Series | None = Non
         feat["leader_ret_3"] = lead_lag_signal(leader_close, close, lag=3)
         feat["leader_corr_30"] = rolling_correlation(leader_close, close, n=30)
 
+    # --- Price action / candle structure (appended last — column order is a contract) ---
+    high   = df["High"]
+    low    = df["Low"]
+    open_  = df["Open"]
+    hl_range = (high - low).replace(0, np.nan)
+
+    feat["body_pct"]         = (close - open_) / hl_range
+    feat["upper_shadow_pct"] = (high - pd.concat([open_, close], axis=1).max(axis=1)) / hl_range
+    feat["lower_shadow_pct"] = (pd.concat([open_, close], axis=1).min(axis=1) - low) / hl_range
+    feat["hl_range_pct"]     = hl_range / close.replace(0, np.nan)
+
     return feat
 
 
