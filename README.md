@@ -7,30 +7,38 @@ Leveraged long/short backtest strategy for the [Code Night](https://github.com/I
 ```bash
 git clone <repo-url>
 cd cmoon
-pip install cnlib
+.venv/bin/python -m pip install cnlib
 ```
 
 ## Running a backtest
 
 ```bash
 # Test the current submission strategy
-python run.py
+.venv/bin/python run.py
 
 # Test individual research strategies
-python run.py --strategy trend
-python run.py --strategy meanrevert
+.venv/bin/python run.py --strategy trend
+.venv/bin/python run.py --strategy meanrevert
 
 # Options
-python run.py --strategy trend --start 50 --plot --capital 3000
+.venv/bin/python run.py --strategy trend --start 50 --end 500 --plot --capital 3000
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--strategy` | `main` | `main`, `trend`, `meanrevert`, `ensemble` |
-| `--start` | `0` | Skip this many candles (warm-up) |
+| `--strategy` | `main` | `main`, `trend`, `meanrevert`; `ensemble` is reserved until Person 3 wires it |
+| `--start` | `0` | First candle to run, inclusive |
+| `--end` | last candle | Last candle to run, inclusive |
 | `--capital` | `3000` | Starting capital |
+| `--data-dir` | bundled `cnlib` data | Directory containing the three coin parquet files |
+| `--list-strategies` | off | Print strategy registry status and exit |
 | `--plot` | off | Save equity curve to `results/` (requires matplotlib) |
 | `--silent` | off | Suppress per-candle progress output |
+
+`run.py` uses the same bounded backtest helper as walk-forward validation, so
+`--start 10 --end 20` runs exactly 11 candles. The `ensemble` name is kept in
+the registry as a reserved placeholder, but selecting it exits cleanly until
+the ensemble implementation exists.
 
 ## Training ML models
 
@@ -51,6 +59,7 @@ cmoon/
 │
 ├── research/
 │   ├── features.py               # Shared indicator library (EMA, ATR, RSI, BB, …)
+│   ├── backtest_window.py         # Bounded inclusive start/end backtest helper
 │   ├── risk.py                   # Leverage selection, stop/TP placement, sizing
 │   ├── trend_strategy.py         # EMA crossover strategy (trending regime)
 │   ├── mean_revert_strategy.py   # RSI + Bollinger Bands (ranging regime)
@@ -127,11 +136,26 @@ holdout_test(TrendStrategy())
 | Train | 0 – 1099 | Parameter tuning, walk-forward CV |
 | Holdout | 1100 – 1569 | Final evaluation only — do not peek |
 
+Walk-forward folds use `research.backtest_window.run_backtest_window()`, which
+stops execution at each fold's `test_end` instead of running future candles and
+slicing results afterward. Future ML workflows can pass
+`retrain_hook(train_end_candle)` to retrain before each fold.
+
+## Tests
+
+```bash
+.venv/bin/python -B -m unittest discover -s tests
+```
+
+The test suite covers Person 1 infrastructure: indicators, bounded backtest
+windows, strategy registry behavior, walk-forward fold bounds, holdout starts,
+and CLI smoke behavior.
+
 ## Team responsibilities
 
 | Person | Owns | Files |
 |---|---|---|
-| Person 1 | Data & infrastructure | `features.py`, `walk_forward.py`, `run.py` |
+| Person 1 | Data & infrastructure | `features.py`, `backtest_window.py`, `walk_forward.py`, `run.py` |
 | Person 2 | Quant strategies & risk | `risk.py`, `trend_strategy.py`, `mean_revert_strategy.py` |
 | Person 3 | ML & ensemble | `ml_features.py`, `train_models.py`, `ensemble.py` |
 

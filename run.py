@@ -2,40 +2,65 @@
 Local backtest runner — run this to test any strategy quickly.
 
 Usage:
-  python run.py                          # runs the current strategy.py
-  python run.py --strategy trend        # runs TrendStrategy
-  python run.py --strategy meanrevert
-  python run.py --strategy ensemble
+  .venv/bin/python run.py                         # runs the current strategy.py
+  .venv/bin/python run.py --strategy trend        # runs TrendStrategy
+  .venv/bin/python run.py --strategy meanrevert
 
 Add --plot to show the equity curve (requires matplotlib).
 """
 import argparse
 import sys
 from pathlib import Path
+from typing import Callable
 
-from cnlib import backtest
+from cnlib.base_strategy import BaseStrategy
+from research.backtest_window import run_backtest_window
 
 # ---------------------------------------------------------------------------
 # Strategy registry — add new strategies here as they're built
 # ---------------------------------------------------------------------------
 
+StrategyFactory = Callable[[], BaseStrategy]
+
+
+class UnavailableStrategyError(ValueError):
+    pass
+
+
+def _main_strategy() -> BaseStrategy:
+    from strategy import MyStrategy
+    return MyStrategy()
+
+
+def _trend_strategy() -> BaseStrategy:
+    from research.trend_strategy import TrendStrategy
+    return TrendStrategy()
+
+
+def _mean_revert_strategy() -> BaseStrategy:
+    from research.mean_revert_strategy import MeanRevertStrategy
+    return MeanRevertStrategy()
+
+
+STRATEGIES: dict[str, StrategyFactory | None] = {
+    "main": _main_strategy,
+    "trend": _trend_strategy,
+    "meanrevert": _mean_revert_strategy,
+    # Reserved for Person 3's final ensemble implementation.
+    "ensemble": None,
+}
+
+
 def get_strategy(name: str):
-    if name == "main":
-        from strategy import MyStrategy
-        return MyStrategy()
-    elif name == "trend":
-        from research.trend_strategy import TrendStrategy
-        return TrendStrategy()
-    elif name == "meanrevert":
-        from research.mean_revert_strategy import MeanRevertStrategy
-        return MeanRevertStrategy()
-    elif name == "ensemble":
-        # TODO: import FinalStrategy from strategy.py once it's built
-        raise NotImplementedError("Ensemble strategy not ready yet")
-    else:
-        print(f"Unknown strategy: {name}")
-        print("Available: main, trend, meanrevert, ensemble")
-        sys.exit(1)
+    factory = STRATEGIES.get(name)
+    if name not in STRATEGIES:
+        available = ", ".join(STRATEGIES)
+        raise ValueError(f"Unknown strategy '{name}'. Available: {available}")
+    if factory is None:
+        raise UnavailableStrategyError(
+            f"Strategy '{name}' is reserved but not implemented yet."
+        )
+    return factory()
 
 
 def plot_equity(result, strategy_name: str) -> None:
@@ -76,20 +101,35 @@ def plot_equity(result, strategy_name: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--strategy", default="main", help="Strategy to run")
+    parser.add_argument("--strategy", default="main", choices=sorted(STRATEGIES), help="Strategy to run")
     parser.add_argument("--capital",  type=float, default=3000.0)
     parser.add_argument("--start",    type=int,   default=0, help="start_candle (warm-up skip)")
+    parser.add_argument("--end",      type=int,   default=None, help="inclusive end_candle")
+    parser.add_argument("--data-dir", type=Path,  default=None, help="directory containing coin parquet files")
+    parser.add_argument("--list-strategies", action="store_true", help="show available strategies and exit")
     parser.add_argument("--plot",     action="store_true")
     parser.add_argument("--silent",   action="store_true")
     args = parser.parse_args()
 
-    strategy = get_strategy(args.strategy)
+    if args.list_strategies:
+        for name, factory in STRATEGIES.items():
+            status = "ready" if factory is not None else "reserved"
+            print(f"{name}\t{status}")
+        return
+
+    try:
+        strategy = get_strategy(args.strategy)
+    except (ValueError, UnavailableStrategyError) as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(2)
 
     print(f"Running strategy: {args.strategy}")
-    result = backtest.run(
+    result = run_backtest_window(
         strategy,
         initial_capital=args.capital,
         start_candle=args.start,
+        end_candle=args.end,
+        data_dir=args.data_dir,
         silent=args.silent,
     )
     result.print_summary()
