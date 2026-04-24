@@ -56,7 +56,7 @@ RESULTS_DIR = ROOT_DIR / "results"
 MODEL_DIR.mkdir(exist_ok=True)
 
 MODEL_FORMAT_VERSION = 2
-TRAIN_END_CANDLE = 1100
+TRAIN_END_CANDLE = 1100  # dev: 1100, final submit öncesi 9999 yap
 
 RF_PARAM_GRID = {
     "n_estimators": [100, 200, 500],
