@@ -1,0 +1,1504 @@
+Index: config.yaml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>project:\n  name: cmoon\n  timezone: UTC\n\npaths:\n  raw_data: data/raw\n  processed_data: data/processed\n  artifacts: artifacts\n  notebooks: notebooks\n  reports: artifacts/reports\n  models: artifacts/models\n  predictions: artifacts/predictions\n\nmarket:\n  symbols:\n    - BTCUSDT\n  market_type: spot\n  bar_interval: 1h\n\nsplits:\n  train_years: 3\n  validation_years: 1\n  locked_holdout_months: 12\n  embargo_days: 5\n\nfeatures:\n  price:\n    - returns\n    - log_returns\n  trend:\n    - ema\n    - macd\n  momentum:\n    - rsi\n    - stochastic\n  volatility:\n    - atr\n    - realized_volatility\n    - bollinger_width\n  volume:\n    - obv\n    - vwap_distance\n  futures_optional:\n    - funding_rate_zscore\n    - open_interest_change\n\nlabels:\n  method: triple_barrier\n  take_profit: 0.02\n  stop_loss: 0.01\n  max_horizon_bars: 24\n  neutral_band: 0.0\n\ncross_validation:\n  method: purged_walk_forward\n  folds: 5\n  embargo_bars: 24\n\nmodel:\n  baseline: rf\n  candidates:\n    - rf\n    - xgb\n  random_state: 42\n  max_tuning_trials: 50\n\nsignals:\n  long_threshold: 0.60\n  short_threshold: 0.40\n\nrisk:\n  target_annual_volatility: 0.15\n  max_single_position_equity_fraction: 0.20\n  max_leverage: 1.0\n  stop_loss_atr_multiple: 1.0\n  take_profit_atr_multiple: 2.0\n  max_hold_bars: 24\n  kill_switch_drawdown: 0.15\n\nbacktest:\n  initial_equity: 100000\n  fill_policy: next_bar_open\n  fee_bps: 5\n  slippage_bps: 2\n  funding_enabled: false\n\nreporting:\n  experiment_log: artifacts/experiment_log.csv\n  equity_curve_plot: artifacts/reports/equity_curve.png\n  tear_sheet: artifacts/reports/tear_sheet.png\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/config.yaml b/config.yaml
+--- a/config.yaml	(revision 2eba8ebdef1a617aa854fa8d45181fe8c7108893)
++++ b/config.yaml	(date 1777053704968)
+@@ -2,6 +2,15 @@
+   name: cmoon
+   timezone: UTC
+ 
++# ── Data source ────────────────────────────────────────────────────────────────
++# provider: csv   → reads from paths.raw_data (e.g. data/raw/BTCUSDT_spot.csv)
++# provider: ccxt  → fetches live from exchange via ccxt; requires env vars
++data_source:
++  provider: csv
++  exchange: binance
++  api_key_env: BINANCE_API_KEY
++  secret_env: BINANCE_SECRET
++
+ paths:
+   raw_data: data/raw
+   processed_data: data/processed
+@@ -49,7 +58,10 @@
+   take_profit: 0.02
+   stop_loss: 0.01
+   max_horizon_bars: 24
+-  neutral_band: 0.0
++  # class_weight: balanced prevents RF/XGBoost from ignoring minority classes
++  class_weight: balanced
++  # Informational: log a warning if any class falls below this ratio
++  min_label_ratio: 0.10
+ 
+ cross_validation:
+   method: purged_walk_forward
+Index: src/risk_manager.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># Dev C owns this module. See docs/architecture.md for the contract.\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/risk_manager.py b/src/risk_manager.py
+--- a/src/risk_manager.py	(revision 2eba8ebdef1a617aa854fa8d45181fe8c7108893)
++++ b/src/risk_manager.py	(date 1777053503812)
+@@ -1,1 +1,115 @@
+-# Dev C owns this module. See docs/architecture.md for the contract.
++"""
++risk_manager.py — Dev C
++Convert trading signals into sized position orders with SL/TP.
++
++Baseline rules:
++- Vol-targeted position sizing: position size inversely scales with realized volatility.
++- Max single-position equity fraction cap.
++- ATR-scaled stop-loss and take-profit.
++- Portfolio-level drawdown kill-switch check (see apply_kill_switch).
++"""
++import numpy as np
++import pandas as pd
++
++
++def size_positions(
++    signals: pd.DataFrame,
++    equity: float,
++    ohlcv: pd.DataFrame,
++    config: dict,
++) -> pd.DataFrame:
++    """
++    Convert signals to position orders with vol-targeted sizing.
++
++    Parameters
++    ----------
++    signals : DataFrame with 'signal' and 'confidence' columns
++    equity  : current portfolio equity in base currency
++    ohlcv   : OHLCV DataFrame available up to the decision timestamp
++    config  : full config dict (reads config["risk"])
++
++    Returns
++    -------
++    DataFrame indexed like signals with columns:
++        signal, position_size, stop_loss_price, take_profit_price, max_hold_bars
++    """
++    cfg = config["risk"]
++    target_vol = cfg.get("target_annual_volatility", 0.15)
++    max_pos_frac = cfg.get("max_single_position_equity_fraction", 0.20)
++    max_leverage = cfg.get("max_leverage", 1.0)
++    sl_mult = cfg.get("stop_loss_atr_multiple", 1.0)
++    tp_mult = cfg.get("take_profit_atr_multiple", 2.0)
++    max_hold = cfg.get("max_hold_bars", 24)
++
++    atr = _atr(ohlcv["high"], ohlcv["low"], ohlcv["close"], 14)
++    rvol = _realized_vol_annual(ohlcv["close"], window=24)
++
++    rows = []
++    for ts in signals.index:
++        sig = int(signals.loc[ts, "signal"])
++
++        if ts not in ohlcv.index or sig == 0:
++            rows.append({
++                "signal": 0,
++                "position_size": 0.0,
++                "stop_loss_price": np.nan,
++                "take_profit_price": np.nan,
++                "max_hold_bars": max_hold,
++            })
++            continue
++
++        price = float(ohlcv.loc[ts, "close"])
++        atr_val = float(atr.get(ts, price * 0.01))
++        vol_est = float(rvol.get(ts, target_vol))
++
++        if vol_est <= 0 or price <= 0:
++            pos_dollars = 0.0
++        else:
++            # Vol-targeting: scale so that 1 ATR move corresponds to target_vol / sqrt(365*24)
++            hourly_target = target_vol / np.sqrt(365 * 24)
++            pos_dollars = equity * hourly_target / (atr_val / price + 1e-9)
++
++        # Cap by max fraction * leverage
++        pos_dollars = min(pos_dollars, equity * max_pos_frac * max_leverage)
++        pos_size = (pos_dollars / price) * sig  # negative for short
++
++        if sig == 1:
++            sl_price = price - sl_mult * atr_val
++            tp_price = price + tp_mult * atr_val
++        else:
++            sl_price = price + sl_mult * atr_val
++            tp_price = price - tp_mult * atr_val
++
++        rows.append({
++            "signal": sig,
++            "position_size": pos_size,
++            "stop_loss_price": sl_price,
++            "take_profit_price": tp_price,
++            "max_hold_bars": max_hold,
++        })
++
++    return pd.DataFrame(rows, index=signals.index)
++
++
++def apply_kill_switch(equity_curve: pd.Series, config: dict) -> bool:
++    """Return True if the drawdown kill-switch threshold was breached."""
++    threshold = config["risk"].get("kill_switch_drawdown", 0.15)
++    peak = equity_curve.cummax()
++    drawdown = (equity_curve - peak) / peak
++    return bool((drawdown < -threshold).any())
++
++
++# ---------------------------------------------------------------------------
++# Private helpers
++# ---------------------------------------------------------------------------
++
++def _atr(high, low, close, period=14) -> pd.Series:
++    tr = pd.concat(
++        [high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1
++    ).max(axis=1)
++    return tr.ewm(com=period - 1, adjust=False).mean()
++
++
++def _realized_vol_annual(close: pd.Series, window: int = 24) -> pd.Series:
++    log_ret = np.log(close / close.shift(1))
++    return log_ret.rolling(window).std() * np.sqrt(365 * 24)
+\ No newline at end of file
+Index: .idea/.gitignore
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/.gitignore b/.idea/.gitignore
+new file mode 100644
+--- /dev/null	(date 1777052038674)
++++ b/.idea/.gitignore	(date 1777052038674)
+@@ -0,0 +1,10 @@
++# Default ignored files
++/shelf/
++/workspace.xml
++# Editor-based HTTP Client requests
++/httpRequests/
++# Ignored default folder with query files
++/queries/
++# Datasource local storage ignored files
++/dataSources/
++/dataSources.local.xml
+Index: src/labeling.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># Dev A owns this module. See docs/architecture.md for the contract.\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/labeling.py b/src/labeling.py
+--- a/src/labeling.py	(revision 2eba8ebdef1a617aa854fa8d45181fe8c7108893)
++++ b/src/labeling.py	(date 1777053397575)
+@@ -1,1 +1,67 @@
+-# Dev A owns this module. See docs/architecture.md for the contract.
++"""
++labeling.py — Dev A
++Create supervised targets using triple-barrier labeling.
++
++Label = +1 if take-profit hit first
++Label = -1 if stop-loss hit first
++Label =  0 if time barrier hit without touching either price barrier
++Rows where the label cannot be computed (last max_horizon_bars rows) are dropped.
++"""
++import numpy as np
++import pandas as pd
++
++
++def make_labels(ohlcv_df: pd.DataFrame, config: dict) -> pd.DataFrame:
++    """
++    Triple-barrier labeling.
++
++    Parameters
++    ----------
++    ohlcv_df : OHLCV DataFrame with UTC DatetimeIndex
++    config   : full config dict (reads config["labels"])
++
++    Returns
++    -------
++    DataFrame with a single 'target' column, same index as ohlcv_df minus
++    the final max_horizon_bars rows (which are dropped).
++    """
++    cfg = config["labels"]
++    pt = cfg.get("take_profit", 0.02)
++    sl = cfg.get("stop_loss", 0.01)
++    max_h = cfg.get("max_horizon_bars", 24)
++
++    close = ohlcv_df["close"].values
++    high = ohlcv_df["high"].values
++    low = ohlcv_df["low"].values
++    n = len(close)
++
++    labels = np.full(n, np.nan, dtype=float)
++
++    for i in range(n - max_h):
++        entry = close[i]
++        tp_price = entry * (1.0 + pt)
++        sl_price = entry * (1.0 - sl)
++        label = 0
++
++        for j in range(1, max_h + 1):
++            h = high[i + j]
++            l = low[i + j]
++            tp_hit = h >= tp_price
++            sl_hit = l <= sl_price
++
++            if tp_hit and sl_hit:
++                # Both barriers in same bar → conservative: treat as stop-loss
++                label = -1
++                break
++            if tp_hit:
++                label = 1
++                break
++            if sl_hit:
++                label = -1
++                break
++
++        labels[i] = label
++
++    result = pd.Series(labels, index=ohlcv_df.index, name="target")
++    result = result.dropna().astype(int)
++    return result.to_frame()
+\ No newline at end of file
+Index: src/metrics.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># Dev C owns this module. See docs/architecture.md for the contract.\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/metrics.py b/src/metrics.py
+--- a/src/metrics.py	(revision 2eba8ebdef1a617aa854fa8d45181fe8c7108893)
++++ b/src/metrics.py	(date 1777054058795)
+@@ -1,1 +1,122 @@
+-# Dev C owns this module. See docs/architecture.md for the contract.
++"""
++metrics.py — Dev C
++Compute strategy performance statistics and produce a tear-sheet plot.
++"""
++from __future__ import annotations
++
++import numpy as np
++import pandas as pd
++from typing import Optional
++
++
++def evaluate(equity: pd.Series, trades: pd.DataFrame) -> dict:
++    """
++    Compute performance metrics from an equity curve and trades log.
++
++    Assumes hourly bars (annualization factor = sqrt(365 * 24)).
++    """
++    if len(equity) < 2:
++        return {}
++
++    returns = equity.pct_change().dropna()
++    annual_factor = np.sqrt(365 * 24)
++
++    mean_ret = returns.mean()
++    std_ret = returns.std()
++
++    sharpe = (mean_ret / (std_ret + 1e-9)) * annual_factor if std_ret > 0 else 0.0
++
++    downside = returns[returns < 0].std()
++    sortino = (mean_ret / (downside + 1e-9)) * annual_factor if downside > 0 else 0.0
++
++    peak = equity.cummax()
++    drawdown = (equity - peak) / peak
++    max_dd = float(drawdown.min())
++
++    years = max((equity.index[-1] - equity.index[0]).days / 365.0, 1 / 365)
++    total_return = (equity.iloc[-1] / equity.iloc[0]) - 1.0
++    annual_return = float((1.0 + total_return) ** (1.0 / years) - 1.0)
++    calmar = annual_return / abs(max_dd + 1e-9) if max_dd < 0 else 0.0
++
++    if len(trades) > 0 and "pnl" in trades.columns:
++        win_rate = float((trades["pnl"] > 0).mean())
++        avg_trade = float(trades["pnl"].mean())
++        trade_count = int(len(trades))
++    else:
++        win_rate = avg_trade = 0.0
++        trade_count = 0
++
++    return {
++        "sharpe": round(sharpe, 4),
++        "sortino": round(sortino, 4),
++        "max_drawdown": round(max_dd, 4),
++        "calmar": round(calmar, 4),
++        "annual_return": round(annual_return, 4),
++        "total_return": round(total_return, 4),
++        "win_rate": round(win_rate, 4),
++        "avg_trade_pnl": round(avg_trade, 2),
++        "trade_count": trade_count,
++        "turnover_per_year": round(trade_count / years, 1),
++    }
++
++
++def plot_equity_curve(
++    equity: pd.Series,
++    trades: pd.DataFrame,
++    output_path: str,
++    metrics_dict: Optional[dict] = None,
++) -> None:
++    """Save a 3-panel tear-sheet: equity curve, drawdown, and monthly returns."""
++    try:
++        import matplotlib.pyplot as plt
++        import matplotlib.gridspec as gridspec
++    except ImportError:
++        print("[metrics] matplotlib not installed — skipping plot. Run: uv add matplotlib")
++        return
++
++    from pathlib import Path
++    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
++
++    fig = plt.figure(figsize=(14, 10))
++    gs = gridspec.GridSpec(3, 1, height_ratios=[3, 1, 1], hspace=0.35)
++
++    # Panel 1 — equity curve
++    ax1 = fig.add_subplot(gs[0])
++    ax1.plot(equity.index, equity.values, color="royalblue", linewidth=1.4, label="Equity")
++    ax1.set_title("Equity Curve", fontsize=13)
++    ax1.set_ylabel("Portfolio Value ($)")
++    ax1.legend(fontsize=9)
++    ax1.grid(True, alpha=0.3)
++
++    # Panel 2 — drawdown
++    ax2 = fig.add_subplot(gs[1], sharex=ax1)
++    peak = equity.cummax()
++    dd = (equity - peak) / peak * 100
++    ax2.fill_between(dd.index, dd.values, 0, color="crimson", alpha=0.45, label="Drawdown")
++    ax2.set_ylabel("Drawdown (%)")
++    ax2.legend(fontsize=9)
++    ax2.grid(True, alpha=0.3)
++
++    # Panel 3 — monthly returns bar chart
++    ax3 = fig.add_subplot(gs[2], sharex=ax1)
++    monthly = equity.resample("ME").last().pct_change().dropna() * 100
++    colors = ["seagreen" if r >= 0 else "crimson" for r in monthly.values]
++    ax3.bar(monthly.index, monthly.values, color=colors, width=20, alpha=0.75)
++    ax3.axhline(0, color="black", linewidth=0.8)
++    ax3.set_ylabel("Monthly Return (%)")
++    ax3.grid(True, alpha=0.3)
++
++    # Metrics footer
++    if metrics_dict:
++        footer = (
++            f"Sharpe: {metrics_dict.get('sharpe', '—')}  |  "
++            f"Sortino: {metrics_dict.get('sortino', '—')}  |  "
++            f"Max DD: {metrics_dict.get('max_drawdown', 0):.1%}  |  "
++            f"Win Rate: {metrics_dict.get('win_rate', 0):.1%}  |  "
++            f"Trades: {metrics_dict.get('trade_count', '—')}"
++        )
++        fig.text(0.5, 0.005, footer, ha="center", fontsize=9, style="italic", color="#333333")
++
++    plt.savefig(output_path, dpi=120, bbox_inches="tight")
++    plt.close()
++    print(f"[metrics] Tear-sheet saved to {output_path}")
+\ No newline at end of file
+Index: src/feature_engineering.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># Dev A owns this module. See docs/architecture.md for the contract.\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/feature_engineering.py b/src/feature_engineering.py
+--- a/src/feature_engineering.py	(revision 2eba8ebdef1a617aa854fa8d45181fe8c7108893)
++++ b/src/feature_engineering.py	(date 1777053378155)
+@@ -1,1 +1,186 @@
+-# Dev A owns this module. See docs/architecture.md for the contract.
++"""
++feature_engineering.py — Dev A
++Build leakage-free features from normalized OHLCV data.
++
++Hard rule: every rolling calculation ends with .shift(1) so that the feature
++at time t uses only data strictly before t.
++Scalers are fit on train data only and returned as a FeatureTransformer object.
++"""
++import pickle
++from dataclasses import dataclass, field
++
++import numpy as np
++import pandas as pd
++from sklearn.preprocessing import RobustScaler
++
++
++@dataclass
++class FeatureTransformer:
++    scaler: RobustScaler = field(default_factory=RobustScaler)
++    feature_cols: list = field(default_factory=list)
++    fitted: bool = False
++
++
++def build_features(ohlcv_df: pd.DataFrame, config: dict) -> pd.DataFrame:
++    """Return a DataFrame of feat_* columns aligned to ohlcv_df's index."""
++    df = ohlcv_df.copy()
++    feat_cfg = config.get("features", {})
++    features: dict = {}
++
++    close = df["close"]
++    high = df["high"]
++    low = df["low"]
++    volume = df["volume"]
++
++    # ---- Price ----
++    if "price" in feat_cfg:
++        price_feats = feat_cfg["price"]
++        if "returns" in price_feats:
++            features["feat_ret_1"] = close.pct_change().shift(1)
++            features["feat_ret_4"] = close.pct_change(4).shift(1)
++            features["feat_ret_24"] = close.pct_change(24).shift(1)
++        if "log_returns" in price_feats:
++            log_r = np.log(close / close.shift(1))
++            features["feat_log_ret_1"] = log_r.shift(1)
++            features["feat_log_ret_24"] = log_r.rolling(24).sum().shift(1)
++
++    # ---- Trend ----
++    if "trend" in feat_cfg:
++        trend_feats = feat_cfg["trend"]
++        if "ema" in trend_feats:
++            ema9 = close.ewm(span=9, adjust=False).mean()
++            ema21 = close.ewm(span=21, adjust=False).mean()
++            ema50 = close.ewm(span=50, adjust=False).mean()
++            features["feat_ema_9_21_ratio"] = (ema9 / ema21 - 1).shift(1)
++            features["feat_ema_21_50_ratio"] = (ema21 / ema50 - 1).shift(1)
++            features["feat_price_ema21_dist"] = (close / ema21 - 1).shift(1)
++        if "macd" in trend_feats:
++            ema12 = close.ewm(span=12, adjust=False).mean()
++            ema26 = close.ewm(span=26, adjust=False).mean()
++            macd_line = ema12 - ema26
++            signal_line = macd_line.ewm(span=9, adjust=False).mean()
++            features["feat_macd_norm"] = (macd_line / close).shift(1)
++            features["feat_macd_hist_norm"] = ((macd_line - signal_line) / close).shift(1)
++
++    # ---- Momentum ----
++    if "momentum" in feat_cfg:
++        mom_feats = feat_cfg["momentum"]
++        if "rsi" in mom_feats:
++            features["feat_rsi_14"] = _rsi(close, 14).shift(1) / 100.0
++            features["feat_rsi_7"] = _rsi(close, 7).shift(1) / 100.0
++        if "stochastic" in mom_feats:
++            stoch_k, stoch_d = _stochastic(high, low, close, 14, 3)
++            features["feat_stoch_k"] = stoch_k.shift(1) / 100.0
++            features["feat_stoch_kd_diff"] = ((stoch_k - stoch_d) / 100.0).shift(1)
++
++    # ---- Volatility ----
++    if "volatility" in feat_cfg:
++        vol_feats = feat_cfg["volatility"]
++        if "atr" in vol_feats:
++            atr = _atr(high, low, close, 14)
++            features["feat_atr_norm"] = (atr / close).shift(1)
++        if "realized_volatility" in vol_feats:
++            log_r = np.log(close / close.shift(1))
++            rv24 = log_r.rolling(24).std()
++            rv168 = log_r.rolling(168).std()
++            features["feat_rvol_24h"] = rv24.shift(1)
++            features["feat_rvol_168h"] = rv168.shift(1)
++            features["feat_rvol_ratio"] = (rv24 / rv168.replace(0, np.nan)).shift(1)
++        if "bollinger_width" in vol_feats:
++            bb_mid = close.rolling(20).mean()
++            bb_std = close.rolling(20).std()
++            features["feat_bb_width"] = (2 * bb_std / bb_mid).shift(1)
++            features["feat_bb_position"] = (
++                (close - bb_mid) / (2 * bb_std + 1e-9)
++            ).shift(1)
++
++    # ---- Volume ----
++    if "volume" in feat_cfg:
++        vol_feats = feat_cfg["volume"]
++        vol_mean = volume.rolling(24).mean()
++        vol_std = volume.rolling(24).std()
++        features["feat_vol_zscore"] = ((volume - vol_mean) / (vol_std + 1e-9)).shift(1)
++        if "obv" in vol_feats:
++            obv = _obv(close, volume)
++            obv_ema = obv.ewm(span=20, adjust=False).mean()
++            features["feat_obv_trend"] = (obv / (obv_ema + 1e-9) - 1).shift(1)
++        if "vwap_distance" in vol_feats:
++            vwap = _rolling_vwap(close, high, low, volume, 24)
++            features["feat_vwap_dist"] = (close / (vwap + 1e-9) - 1).shift(1)
++
++    # ---- Futures-only ----
++    if "futures_optional" in feat_cfg:
++        futures_feats = feat_cfg["futures_optional"]
++        if "funding_rate_zscore" in futures_feats and "funding_rate" in df.columns:
++            fr = df["funding_rate"]
++            fr_mean = fr.rolling(168).mean()
++            fr_std = fr.rolling(168).std()
++            features["feat_funding_zscore"] = ((fr - fr_mean) / (fr_std + 1e-9)).shift(1)
++        if "open_interest_change" in futures_feats and "open_interest" in df.columns:
++            features["feat_oi_change"] = df["open_interest"].pct_change().shift(1)
++
++    return pd.DataFrame(features, index=df.index)
++
++
++def fit_transformer(train_features: pd.DataFrame) -> FeatureTransformer:
++    """Fit RobustScaler on train features only. Call once, reuse for val/holdout."""
++    transformer = FeatureTransformer()
++    transformer.feature_cols = train_features.columns.tolist()
++    clean = train_features.dropna()
++    transformer.scaler.fit(clean)
++    transformer.fitted = True
++    return transformer
++
++
++def transform(features_df: pd.DataFrame, transformer: FeatureTransformer) -> pd.DataFrame:
++    """Apply a fitted transformer to any split."""
++    assert transformer.fitted, "Transformer must be fit before calling transform."
++    cols = [c for c in transformer.feature_cols if c in features_df.columns]
++    out = features_df.copy()
++    mask = ~features_df[cols].isna().any(axis=1)
++    out.loc[mask, cols] = transformer.scaler.transform(features_df.loc[mask, cols])
++    return out
++
++
++def save_transformer(transformer: FeatureTransformer, path: str) -> None:
++    with open(path, "wb") as f:
++        pickle.dump(transformer, f)
++
++
++def load_transformer(path: str) -> FeatureTransformer:
++    with open(path, "rb") as f:
++        return pickle.load(f)
++
++
++# ---------------------------------------------------------------------------
++# Private helpers
++# ---------------------------------------------------------------------------
++
++def _rsi(close: pd.Series, period: int) -> pd.Series:
++    delta = close.diff()
++    gain = delta.clip(lower=0).ewm(com=period - 1, adjust=False).mean()
++    loss = (-delta.clip(upper=0)).ewm(com=period - 1, adjust=False).mean()
++    return 100 - (100 / (1 + gain / (loss + 1e-9)))
++
++
++def _stochastic(high, low, close, k_period=14, d_period=3):
++    low_k = low.rolling(k_period).min()
++    high_k = high.rolling(k_period).max()
++    k = 100 * (close - low_k) / (high_k - low_k + 1e-9)
++    return k, k.rolling(d_period).mean()
++
++
++def _atr(high, low, close, period=14) -> pd.Series:
++    tr = pd.concat(
++        [high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1
++    ).max(axis=1)
++    return tr.ewm(com=period - 1, adjust=False).mean()
++
++
++def _obv(close: pd.Series, volume: pd.Series) -> pd.Series:
++    return (np.sign(close.diff()).fillna(0) * volume).cumsum()
++
++
++def _rolling_vwap(close, high, low, volume, window=24) -> pd.Series:
++    tp = (high + low + close) / 3
++    return (tp * volume).rolling(window).sum() / (volume.rolling(window).sum() + 1e-9)
+\ No newline at end of file
+Index: src/model_training.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># Dev B owns this module. See docs/architecture.md for the contract.\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/model_training.py b/src/model_training.py
+--- a/src/model_training.py	(revision 2eba8ebdef1a617aa854fa8d45181fe8c7108893)
++++ b/src/model_training.py	(date 1777053448880)
+@@ -1,1 +1,152 @@
+-# Dev B owns this module. See docs/architecture.md for the contract.
++"""
++model_training.py — Dev B
++Fit ML models and produce out-of-fold predictions.
++
++Rules:
++- Never calls data_loader or labeling.
++- Receives pre-split, pre-scaled data.
++- Supports 'rf' and 'xgb' via a unified train() interface.
++- Hyperparameter tuning uses only training folds.
++"""
++import pickle
++from typing import Optional
++
++import numpy as np
++import pandas as pd
++from sklearn.ensemble import RandomForestClassifier
++from sklearn.metrics import log_loss
++
++try:
++    import xgboost as xgb
++    HAS_XGB = True
++except ImportError:
++    HAS_XGB = False
++
++
++def train(
++    X: pd.DataFrame,
++    y: pd.Series,
++    cv_splits,
++    model_type: str = "rf",
++    params: Optional[dict] = None,
++    config: Optional[dict] = None,
++) -> tuple:
++    """
++    Train a model with purged CV and return the final model + OOF predictions.
++
++    Parameters
++    ----------
++    X          : feature DataFrame (pre-scaled, aligned to y)
++    y          : target Series with values in {-1, 0, 1}
++    cv_splits  : iterable of (train_idx, val_idx) from cv_splitter
++    model_type : 'rf' or 'xgb'
++    params     : dict of hyperparameter overrides
++    config     : full config dict (used for class_weight, random_state)
++
++    Returns
++    -------
++    (fitted_model, oof_preds_df)
++    oof_preds_df has columns [-1, 0, 1] with probabilities for each class.
++    """
++    if params is None:
++        params = {}
++
++    classes = [-1, 0, 1]
++    oof_preds = pd.DataFrame(np.nan, index=y.index, columns=classes, dtype=float)
++
++    for fold_idx, (train_idx, val_idx) in enumerate(cv_splits):
++        X_tr = X.iloc[train_idx]
++        X_val = X.iloc[val_idx]
++        y_tr = y.iloc[train_idx]
++        y_val = y.iloc[val_idx]
++
++        mask_tr = ~(X_tr.isna().any(axis=1) | y_tr.isna())
++        mask_val = ~(X_val.isna().any(axis=1) | y_val.isna())
++
++        if mask_tr.sum() == 0 or mask_val.sum() == 0:
++            continue
++
++        model = _build_model(model_type, params, config)
++        model.fit(X_tr[mask_tr], y_tr[mask_tr])
++
++        probs = model.predict_proba(X_val[mask_val])
++        model_classes = list(model.classes_)
++
++        for cls in classes:
++            if cls in model_classes:
++                col_idx = model_classes.index(cls)
++                oof_preds.loc[X_val[mask_val].index, cls] = probs[:, col_idx]
++
++        val_classes_present = sorted(y_val[mask_val].unique())
++        if len(val_classes_present) > 1:
++            fold_loss = log_loss(y_val[mask_val], probs, labels=model_classes)
++            print(f"  Fold {fold_idx}: log_loss={fold_loss:.4f}  "
++                  f"n_train={mask_tr.sum()}  n_val={mask_val.sum()}")
++
++    # Final model fit on all non-NaN training data
++    mask_all = ~(X.isna().any(axis=1) | y.isna())
++    final_model = _build_model(model_type, params, config)
++    final_model.fit(X[mask_all], y[mask_all])
++
++    return final_model, oof_preds
++
++
++def predict_proba(model, X: pd.DataFrame) -> pd.DataFrame:
++    """Return class probability DataFrame aligned to X's index."""
++    mask = ~X.isna().any(axis=1)
++    probs = pd.DataFrame(np.nan, index=X.index, columns=model.classes_, dtype=float)
++    if mask.sum() > 0:
++        probs.loc[mask] = model.predict_proba(X[mask])
++    return probs
++
++
++def save_model(model, path: str) -> None:
++    with open(path, "wb") as f:
++        pickle.dump(model, f)
++
++
++def load_model(path: str):
++    with open(path, "rb") as f:
++        return pickle.load(f)
++
++
++# ---------------------------------------------------------------------------
++# Private helpers
++# ---------------------------------------------------------------------------
++
++def _build_model(model_type: str, params: dict, config: Optional[dict]):
++    model_cfg = (config or {}).get("model", {})
++    label_cfg = (config or {}).get("labels", {})
++    random_state = model_cfg.get("random_state", 42)
++    class_weight = label_cfg.get("class_weight", "balanced")
++
++    if model_type == "rf":
++        defaults = dict(
++            n_estimators=300,
++            max_depth=8,
++            min_samples_leaf=20,
++            max_features="sqrt",
++            class_weight=class_weight,
++            random_state=random_state,
++            n_jobs=-1,
++        )
++        defaults.update(params)
++        return RandomForestClassifier(**defaults)
++
++    if model_type == "xgb":
++        if not HAS_XGB:
++            raise ImportError("xgboost not installed. Run: uv add xgboost")
++        defaults = dict(
++            n_estimators=500,
++            max_depth=5,
++            learning_rate=0.05,
++            subsample=0.8,
++            colsample_bytree=0.8,
++            min_child_weight=20,
++            random_state=random_state,
++            eval_metric="mlogloss",
++        )
++        defaults.update(params)
++        return xgb.XGBClassifier(**defaults)
++
++    raise ValueError(f"Unknown model_type '{model_type}'. Choose 'rf' or 'xgb'.")
+\ No newline at end of file
+Index: src/data_loader.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># Dev A owns this module. See docs/architecture.md for the contract.\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/data_loader.py b/src/data_loader.py
+--- a/src/data_loader.py	(revision 2eba8ebdef1a617aa854fa8d45181fe8c7108893)
++++ b/src/data_loader.py	(date 1777053338356)
+@@ -1,1 +1,144 @@
+-# Dev A owns this module. See docs/architecture.md for the contract.
++"""
++data_loader.py — Dev A
++Load raw market data and enforce chronological splits.
++Only this module may define or enforce train/val/holdout boundaries.
++"""
++import os
++from pathlib import Path
++
++import pandas as pd
++import yaml
++
++
++def load_config(config_path: str = "config.yaml") -> dict:
++    with open(config_path) as f:
++        return yaml.safe_load(f)
++
++
++def load_ohlcv(symbol: str, market_type: str, config: dict) -> pd.DataFrame:
++    """Load OHLCV data from the configured source (csv or ccxt)."""
++    source = config.get("data_source", {})
++    provider = source.get("provider", "csv")
++
++    if provider == "csv":
++        return _load_from_csv(symbol, market_type, config)
++    elif provider in ("ccxt", "binance"):
++        return _load_from_ccxt(symbol, market_type, config)
++    else:
++        raise ValueError(f"Unknown provider '{provider}'. Choose 'csv' or 'ccxt'.")
++
++
++def get_splits(df: pd.DataFrame, config: dict):
++    """
++    Carve train, validation, and locked holdout from df.
++
++    Order of operations:
++      1. Holdout is carved from the END first — never touched during training.
++      2. Remaining data is split into train and val with an embargo gap.
++
++    Returns
++    -------
++    (train_df, val_df, holdout_df)
++    """
++    splits_cfg = config["splits"]
++    embargo_days = splits_cfg.get("embargo_days", 5)
++    holdout_months = splits_cfg.get("locked_holdout_months", 12)
++    val_years = splits_cfg.get("validation_years", 1)
++
++    # Step 1 — carve holdout from the end
++    holdout_start = df.index[-1] - pd.DateOffset(months=holdout_months)
++    holdout_df = df.loc[df.index > holdout_start].copy()
++    remaining = df.loc[df.index <= holdout_start].copy()
++
++    # Step 2 — split remaining into train / val with embargo
++    val_days = int(val_years * 365)
++    val_start = remaining.index[-1] - pd.Timedelta(days=val_days)
++    embargo_end = val_start + pd.Timedelta(days=embargo_days)
++
++    train_df = remaining.loc[remaining.index < val_start].copy()
++    val_df = remaining.loc[remaining.index >= embargo_end].copy()
++
++    assert len(train_df) > 0, "Train split is empty — check split config."
++    assert len(val_df) > 0, "Validation split is empty — check split config."
++    assert len(holdout_df) > 0, "Holdout split is empty — check split config."
++    assert train_df.index[-1] < val_df.index[0], "Train/val overlap after embargo."
++
++    return train_df, val_df, holdout_df
++
++
++# ---------------------------------------------------------------------------
++# Private helpers
++# ---------------------------------------------------------------------------
++
++def _load_from_csv(symbol: str, market_type: str, config: dict) -> pd.DataFrame:
++    raw_dir = Path(config["paths"]["raw_data"])
++    safe_symbol = symbol.replace("/", "_")
++    candidates = [
++        raw_dir / f"{safe_symbol}_{market_type}.csv",
++        raw_dir / f"{safe_symbol}.csv",
++        raw_dir / f"{symbol}.csv",
++    ]
++    for path in candidates:
++        if path.exists():
++            df = pd.read_csv(path, index_col=0, parse_dates=True)
++            return _validate_and_normalize(df, symbol)
++    raise FileNotFoundError(
++        f"No CSV found for {symbol} in {raw_dir}. Tried: {[str(c) for c in candidates]}"
++    )
++
++
++def _load_from_ccxt(symbol: str, market_type: str, config: dict) -> pd.DataFrame:
++    try:
++        import ccxt
++    except ImportError:
++        raise ImportError("ccxt not installed. Run: uv add ccxt")
++
++    source = config["data_source"]
++    exchange_id = source.get("exchange", "binance")
++    exchange_class = getattr(ccxt, exchange_id)
++
++    api_key = os.environ.get(source.get("api_key_env", ""), "")
++    secret = os.environ.get(source.get("secret_env", ""), "")
++
++    exchange = exchange_class({"apiKey": api_key, "secret": secret, "enableRateLimit": True})
++    timeframe = config["market"]["bar_interval"]
++    limit = 1000
++
++    all_bars: list = []
++    since = None
++    while True:
++        bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
++        if not bars:
++            break
++        all_bars.extend(bars)
++        if len(bars) < limit:
++            break
++        since = bars[-1][0] + 1
++
++    df = pd.DataFrame(all_bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
++    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
++    df = df.set_index("timestamp")
++    return _validate_and_normalize(df, symbol)
++
++
++def _validate_and_normalize(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
++    required = ["open", "high", "low", "close", "volume"]
++    missing = [c for c in required if c not in df.columns]
++    if missing:
++        raise ValueError(f"Missing columns {missing} for {symbol}")
++
++    # Ensure UTC timezone-aware index
++    if df.index.tz is None:
++        df.index = df.index.tz_localize("UTC")
++    else:
++        df.index = df.index.tz_convert("UTC")
++
++    df = df.sort_index()
++    df = df.dropna(subset=required)
++    df = df[~df.index.duplicated(keep="first")]
++
++    assert df.index.is_monotonic_increasing, f"Index not monotonic for {symbol}"
++    assert not df[required].isna().any().any(), f"NaN values in OHLCV for {symbol}"
++
++    extras = [c for c in df.columns if c not in required]
++    return df[required + extras]
+\ No newline at end of file
+Index: src/signal_generator.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># Dev B owns this module. See docs/architecture.md for the contract.\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/signal_generator.py b/src/signal_generator.py
+--- a/src/signal_generator.py	(revision 2eba8ebdef1a617aa854fa8d45181fe8c7108893)
++++ b/src/signal_generator.py	(date 1777053468090)
+@@ -1,1 +1,54 @@
+-# Dev B owns this module. See docs/architecture.md for the contract.
++"""
++signal_generator.py — Dev B
++Convert model probability outputs to directional trading signals.
++
++Thresholds come from config only — never hardcoded here.
++Calibration, if used, must be fit on training folds only.
++"""
++import numpy as np
++import pandas as pd
++
++
++def generate_signals(probs_df: pd.DataFrame, config: dict) -> pd.DataFrame:
++    """
++    Threshold model probabilities into {-1, 0, +1} signals.
++
++    Parameters
++    ----------
++    probs_df : DataFrame with columns corresponding to class labels.
++               Expected columns: -1, 0, 1 (integers or numeric).
++    config   : full config dict (reads config["signals"])
++
++    Returns
++    -------
++    DataFrame with columns:
++        signal     : int in {-1, 0, 1}
++        confidence : float in [0, 1]
++    """
++    sig_cfg = config["signals"]
++    long_thresh = sig_cfg.get("long_threshold", 0.60)
++    short_thresh = sig_cfg.get("short_threshold", 0.40)
++
++    signal = pd.Series(0, index=probs_df.index, dtype=int, name="signal")
++    confidence = pd.Series(0.0, index=probs_df.index, name="confidence")
++
++    if 1 in probs_df.columns:
++        long_mask = probs_df[1] >= long_thresh
++        signal[long_mask] = 1
++        confidence[long_mask] = probs_df.loc[long_mask, 1]
++
++    if -1 in probs_df.columns:
++        # short threshold: p(short) must exceed (1 - short_thresh) to avoid being
++        # too trigger-happy with the symmetric threshold convention
++        short_prob_thresh = 1.0 - short_thresh
++        short_mask = probs_df[-1] >= short_prob_thresh
++        signal[short_mask] = -1
++        confidence[short_mask] = probs_df.loc[short_mask, -1]
++
++    # Resolve conflicts: if both long and short thresholds triggered → go flat
++    if 1 in probs_df.columns and -1 in probs_df.columns:
++        conflict = (probs_df[1] >= long_thresh) & (probs_df[-1] >= (1.0 - short_thresh))
++        signal[conflict] = 0
++        confidence[conflict] = 0.0
++
++    return pd.DataFrame({"signal": signal, "confidence": confidence})
+\ No newline at end of file
+Index: src/backtest_engine.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># Dev C owns this module. See docs/architecture.md for the contract.\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/backtest_engine.py b/src/backtest_engine.py
+--- a/src/backtest_engine.py	(revision 2eba8ebdef1a617aa854fa8d45181fe8c7108893)
++++ b/src/backtest_engine.py	(date 1777054084181)
+@@ -1,1 +1,179 @@
+-# Dev C owns this module. See docs/architecture.md for the contract.
++"""
++backtest_engine.py — Dev C
++Bar-by-bar trade simulator with realistic execution assumptions.
++
++Rules:
++- Fill at next bar open only.
++- Apply fees and slippage on every fill.
++- Apply futures funding costs when enabled.
++- Decision functions may receive only data up to the current timestamp.
++- Kill-switch check after each trade close.
++"""
++from __future__ import annotations
++
++import numpy as np
++import pandas as pd
++from typing import Optional
++
++
++def run_backtest(
++    ohlcv: pd.DataFrame,
++    orders: pd.DataFrame,
++    config: dict,
++) -> tuple:
++    """
++    Simulate trades bar by bar.
++
++    Parameters
++    ----------
++    ohlcv   : full OHLCV DataFrame for the evaluation period
++    orders  : DataFrame indexed like ohlcv with columns:
++              signal, position_size, stop_loss_price, take_profit_price, max_hold_bars
++    config  : full config dict
++
++    Returns
++    -------
++    (trades_df, equity_curve)
++    trades_df    : one row per closed trade
++    equity_curve : pd.Series of portfolio value at each bar
++    """
++    bt_cfg = config["backtest"]
++    initial_equity = bt_cfg.get("initial_equity", 100_000)
++    fee_bps = bt_cfg.get("fee_bps", 5) / 10_000
++    slippage_bps = bt_cfg.get("slippage_bps", 2) / 10_000
++    funding_enabled = bt_cfg.get("funding_enabled", False)
++    max_dd_threshold = config["risk"].get("kill_switch_drawdown", 0.15)
++
++    equity = float(initial_equity)
++    equity_curve: dict = {}
++    trades: list = []
++    active = None  # type: Optional[dict]
++    kill_triggered = False
++
++    timestamps = ohlcv.index.tolist()
++
++    for i, ts in enumerate(timestamps):
++        equity_curve[ts] = equity
++
++        if i == 0:
++            continue
++
++        bar = ohlcv.loc[ts]
++        prev_ts = timestamps[i - 1]
++
++        if kill_triggered:
++            continue
++
++        # ---- Manage active position ----
++        if active is not None:
++            active["bars_held"] += 1
++            direction = active["direction"]
++            exit_price = None
++            close_reason = None
++
++            if direction == 1:
++                if bar["low"] <= active["sl"]:
++                    exit_price, close_reason = active["sl"], "sl"
++                elif bar["high"] >= active["tp"]:
++                    exit_price, close_reason = active["tp"], "tp"
++            elif direction == -1:
++                if bar["high"] >= active["sl"]:
++                    exit_price, close_reason = active["sl"], "sl"
++                elif bar["low"] <= active["tp"]:
++                    exit_price, close_reason = active["tp"], "tp"
++
++            if close_reason is None and active["bars_held"] >= active["max_hold"]:
++                exit_price, close_reason = bar["open"], "time"
++
++            if close_reason is not None:
++                # Apply slippage on exit (adverse direction)
++                slip_adj = slippage_bps * direction
++                exit_price_net = exit_price * (1 - slip_adj)
++
++                size = abs(active["size"])
++                pnl = direction * size * (exit_price_net - active["entry_price"])
++                exit_fee = size * exit_price_net * fee_bps
++
++                # Funding cost for futures
++                if funding_enabled and "funding_rate" in ohlcv.columns:
++                    funding_sum = ohlcv.loc[active["entry_ts"]:ts, "funding_rate"].sum()
++                    pnl -= size * active["entry_price"] * abs(funding_sum)
++
++                net_pnl = pnl - exit_fee
++                equity += net_pnl
++
++                trades.append({
++                    "entry_ts": active["entry_ts"],
++                    "exit_ts": ts,
++                    "direction": direction,
++                    "entry_price": active["entry_price"],
++                    "exit_price": exit_price_net,
++                    "size": size,
++                    "pnl": net_pnl,
++                    "close_reason": close_reason,
++                })
++                active = None
++                equity_curve[ts] = equity
++
++                # Check kill-switch
++                eq_series = pd.Series(equity_curve)
++                peak = eq_series.cummax().iloc[-1]
++                if peak > 0 and (equity - peak) / peak < -max_dd_threshold:
++                    kill_triggered = True
++                    print(f"[backtest] Kill switch at {ts}: "
++                          f"drawdown={(equity - peak) / peak:.2%}")
++
++        # ---- Open new position ----
++        if active is None and not kill_triggered and prev_ts in orders.index:
++            order = orders.loc[prev_ts]
++            sig = int(order["signal"])
++            pos_size = order["position_size"]
++
++            if sig != 0 and not np.isnan(pos_size) and abs(pos_size) > 0:
++                fill_price = bar["open"] * (1 + slippage_bps * sig)
++                entry_fee = abs(pos_size) * fill_price * fee_bps
++                equity -= entry_fee
++
++                active = {
++                    "direction": sig,
++                    "entry_price": fill_price,
++                    "size": pos_size,
++                    "sl": float(order["stop_loss_price"]),
++                    "tp": float(order["take_profit_price"]),
++                    "max_hold": int(order["max_hold_bars"]),
++                    "bars_held": 0,
++                    "entry_ts": ts,
++                }
++
++        equity_curve[ts] = equity
++
++    # Close any open position at end of data
++    if active is not None:
++        last_bar = ohlcv.iloc[-1]
++        direction = active["direction"]
++        exit_price = float(last_bar["close"]) * (1 - slippage_bps * direction)
++        size = abs(active["size"])
++        pnl = direction * size * (exit_price - active["entry_price"])
++        exit_fee = size * exit_price * fee_bps
++        equity += pnl - exit_fee
++        last_ts = ohlcv.index[-1]
++        trades.append({
++            "entry_ts": active["entry_ts"],
++            "exit_ts": last_ts,
++            "direction": direction,
++            "entry_price": active["entry_price"],
++            "exit_price": exit_price,
++            "size": size,
++            "pnl": pnl - exit_fee,
++            "close_reason": "end_of_data",
++        })
++        equity_curve[last_ts] = equity
++
++    _trade_cols = [
++        "entry_ts", "exit_ts", "direction", "entry_price",
++        "exit_price", "size", "pnl", "close_reason",
++    ]
++    trades_df = pd.DataFrame(trades, columns=_trade_cols) if trades else pd.DataFrame(columns=_trade_cols)
++    equity_series = pd.Series(equity_curve)
++
++    return trades_df, equity_series
+\ No newline at end of file
+Index: src/cv_splitter.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># Dev B owns this module. See docs/architecture.md for the contract.\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/cv_splitter.py b/src/cv_splitter.py
+--- a/src/cv_splitter.py	(revision 2eba8ebdef1a617aa854fa8d45181fe8c7108893)
++++ b/src/cv_splitter.py	(date 1777053421533)
+@@ -1,1 +1,52 @@
+-# Dev B owns this module. See docs/architecture.md for the contract.
++"""
++cv_splitter.py — Dev B
++Purged walk-forward cross-validation.
++
++Standard k-fold leaks future information when time-series features/labels overlap.
++This splitter ensures every validation fold is strictly after its training window,
++with an embargo gap at least as large as the label horizon.
++"""
++from typing import Generator, Tuple
++
++import numpy as np
++import pandas as pd
++
++
++def purged_walk_forward_cv(
++    df: pd.DataFrame,
++    n_folds: int,
++    embargo_bars: int,
++) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
++    """
++    Generate (train_idx, val_idx) pairs for purged walk-forward CV.
++
++    Each validation fold is one chronological chunk.
++    The training window expands to include all data before the fold minus
++    an embargo gap of `embargo_bars` bars.
++
++    Parameters
++    ----------
++    df           : DataFrame whose integer positions form the index space
++    n_folds      : number of CV folds
++    embargo_bars : bars to remove from the end of each train window
++                   (should equal at least the label horizon)
++
++    Yields
++    ------
++    (train_idx, val_idx) as arrays of integer positions
++    """
++    n = len(df)
++    fold_size = n // (n_folds + 1)
++
++    for fold in range(n_folds):
++        val_start = (fold + 1) * fold_size
++        val_end = min(val_start + fold_size, n)
++        train_end = val_start - embargo_bars
++
++        if train_end <= 0 or val_start >= n:
++            continue
++
++        train_idx = np.arange(0, train_end)
++        val_idx = np.arange(val_start, val_end)
++
++        yield train_idx, val_idx
+\ No newline at end of file
+Index: pyproject.toml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>[project]\nname = \"cmoon\"\nversion = \"0.1.0\"\ndescription = \"Add your description here\"\nreadme = \"README.md\"\nrequires-python = \">=3.14\"\ndependencies = [\n    \"pandas>=3.0.2\",\n    \"scikit-learn>=1.8.0\",\n]\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml	(revision 2eba8ebdef1a617aa854fa8d45181fe8c7108893)
++++ b/pyproject.toml	(date 1777053722742)
+@@ -1,10 +1,26 @@
+ [project]
+ name = "cmoon"
+ version = "0.1.0"
+-description = "Add your description here"
++description = "Hackathon trading bot — purged-CV ML pipeline"
+ readme = "README.md"
+-requires-python = ">=3.14"
++requires-python = ">=3.11"
+ dependencies = [
+-    "pandas>=3.0.2",
+-    "scikit-learn>=1.8.0",
++    "pandas>=2.2",
++    "numpy>=1.26",
++    "scikit-learn>=1.4",
++    "xgboost>=2.0",
++    "ccxt>=4.0",
++    "optuna>=3.6",
++    "matplotlib>=3.8",
++    "pyarrow>=14.0",
++    "pyyaml>=6.0",
+ ]
++
++[project.optional-dependencies]
++dev = [
++    "pytest>=8.0",
++    "pytest-cov>=5.0",
++]
++
++[tool.pytest.ini_options]
++testpaths = ["tests"]
+Index: src/pipeline.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># Shared integration entrypoint. See docs/architecture.md for the contract.\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/pipeline.py b/src/pipeline.py
+--- a/src/pipeline.py	(revision 2eba8ebdef1a617aa854fa8d45181fe8c7108893)
++++ b/src/pipeline.py	(date 1777053605372)
+@@ -1,1 +1,204 @@
+-# Shared integration entrypoint. See docs/architecture.md for the contract.
++"""
++pipeline.py — Shared integration entrypoint
++Wires all modules end-to-end for a reproducible experiment run.
++
++Usage:
++    python -m src.pipeline --config config.yaml
++    python -m src.pipeline --config config.yaml --split holdout   # ⚠ one-time only
++"""
++import argparse
++import csv
++import os
++from datetime import datetime, timezone
++from pathlib import Path
++
++import pandas as pd
++import yaml
++
++from src import (
++    backtest_engine,
++    cv_splitter,
++    data_loader,
++    feature_engineering,
++    labeling,
++    metrics,
++    model_training,
++    risk_manager,
++    signal_generator,
++)
++
++
++def load_config(path: str) -> dict:
++    with open(path) as f:
++        return yaml.safe_load(f)
++
++
++def _ensure_dirs(config: dict) -> None:
++    for key in ("artifacts", "reports", "models", "predictions", "processed_data"):
++        path = config["paths"].get(key)
++        if path:
++            Path(path).mkdir(parents=True, exist_ok=True)
++
++
++def _log_experiment(config: dict, result: dict) -> None:
++    log_path = config["reporting"]["experiment_log"]
++    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
++    row = {"run_ts": datetime.now(timezone.utc).isoformat(), **result}
++    write_header = not Path(log_path).exists()
++    with open(log_path, "a", newline="") as f:
++        writer = csv.DictWriter(f, fieldnames=row.keys())
++        if write_header:
++            writer.writeheader()
++        writer.writerow(row)
++
++
++def run_pipeline(config_path: str = "config.yaml", eval_split: str = "val") -> dict:
++    """
++    Run a full pipeline experiment.
++
++    Parameters
++    ----------
++    config_path : path to config.yaml
++    eval_split  : 'val' for normal development, 'holdout' for final OOS simulation
++                  (holdout should be used exactly once)
++    """
++    config = load_config(config_path)
++    _ensure_dirs(config)
++
++    if eval_split == "holdout":
++        print("=" * 60)
++        print("  WARNING: Running on the LOCKED HOLDOUT.")
++        print("  Use this exactly once. No re-tuning after this run.")
++        print("=" * 60)
++
++    symbol = config["market"]["symbols"][0]
++    market_type = config["market"]["market_type"]
++
++    # ── 1. Load data ──────────────────────────────────────────────────────────
++    print(f"\n[1/7] Loading {symbol} ({market_type}) ...")
++    ohlcv = data_loader.load_ohlcv(symbol, market_type, config)
++    print(f"      {len(ohlcv)} bars  |  {ohlcv.index[0]}  →  {ohlcv.index[-1]}")
++
++    train_df, val_df, holdout_df = data_loader.get_splits(ohlcv, config)
++    print(f"      train={len(train_df)}  val={len(val_df)}  holdout={len(holdout_df)}")
++
++    eval_df = val_df if eval_split == "val" else holdout_df
++
++    # ── 2. Features ───────────────────────────────────────────────────────────
++    print("\n[2/7] Building features ...")
++    train_feats = feature_engineering.build_features(train_df, config)
++    eval_feats = feature_engineering.build_features(eval_df, config)
++
++    transformer = feature_engineering.fit_transformer(train_feats.dropna())
++    train_scaled = feature_engineering.transform(train_feats, transformer)
++    eval_scaled = feature_engineering.transform(eval_feats, transformer)
++
++    transformer_path = os.path.join(config["paths"]["models"], "transformer.pkl")
++    feature_engineering.save_transformer(transformer, transformer_path)
++    print(f"      Transformer saved → {transformer_path}")
++    print(f"      Feature columns: {len(transformer.feature_cols)}")
++
++    # ── 3. Labels ─────────────────────────────────────────────────────────────
++    print("\n[3/7] Building labels ...")
++    train_labels = labeling.make_labels(train_df, config)
++    eval_labels = labeling.make_labels(eval_df, config)
++
++    # Align features and labels
++    train_idx = train_scaled.index.intersection(train_labels.index)
++    X_train = train_scaled.loc[train_idx].dropna()
++    y_train = train_labels.loc[X_train.index, "target"]
++
++    eval_idx = eval_scaled.index.intersection(eval_labels.index)
++    X_eval = eval_scaled.loc[eval_idx].dropna()
++    y_eval = eval_labels.loc[X_eval.index, "target"]
++
++    dist = y_train.value_counts().sort_index().to_dict()
++    print(f"      Label distribution (train): {dist}")
++    print(f"      X_train={len(X_train)}  X_eval={len(X_eval)}")
++
++    # ── 4. Train model ────────────────────────────────────────────────────────
++    cv_cfg = config["cross_validation"]
++    cv_splits = list(
++        cv_splitter.purged_walk_forward_cv(
++            X_train,
++            n_folds=cv_cfg["folds"],
++            embargo_bars=cv_cfg["embargo_bars"],
++        )
++    )
++
++    model_type = config["model"]["baseline"]
++    print(f"\n[4/7] Training {model_type} with {len(cv_splits)} CV folds ...")
++    model, oof_preds = model_training.train(
++        X_train, y_train, cv_splits, model_type=model_type, config=config
++    )
++
++    model_path = os.path.join(config["paths"]["models"], f"model_{model_type}.pkl")
++    model_training.save_model(model, model_path)
++    print(f"      Model saved → {model_path}")
++
++    # Save dataset artifact
++    dataset_path = os.path.join(config["paths"]["processed_data"], "dataset_v1.parquet")
++    ds = X_train.copy()
++    ds["target"] = y_train
++    ds.to_parquet(dataset_path)
++    print(f"      Dataset artifact → {dataset_path}")
++
++    # ── 5. Signals ────────────────────────────────────────────────────────────
++    print(f"\n[5/7] Generating signals on '{eval_split}' set ...")
++    eval_probs = model_training.predict_proba(model, X_eval)
++    signals = signal_generator.generate_signals(eval_probs, config)
++    sig_counts = signals["signal"].value_counts().sort_index().to_dict()
++    print(f"      Signal distribution: {sig_counts}")
++
++    preds_path = os.path.join(config["paths"]["predictions"], f"signals_{eval_split}.parquet")
++    signals.to_parquet(preds_path)
++
++    # ── 6. Risk sizing + backtest ──────────────────────────────────────────────
++    print("\n[6/7] Sizing positions and running backtest ...")
++    initial_equity = config["backtest"]["initial_equity"]
++    orders = risk_manager.size_positions(signals, initial_equity, eval_df, config)
++
++    trades, equity_curve = backtest_engine.run_backtest(eval_df, orders, config)
++    print(f"      Trades: {len(trades)}")
++
++    # ── 7. Metrics + reporting ─────────────────────────────────────────────────
++    print("\n[7/7] Computing metrics ...")
++    result = metrics.evaluate(equity_curve, trades)
++    result["model_type"] = model_type
++    result["eval_split"] = eval_split
++    result["n_train"] = len(X_train)
++    result["n_eval"] = len(X_eval)
++    result["n_features"] = len(transformer.feature_cols)
++
++    print("\n" + "=" * 40)
++    print("  RESULTS")
++    print("=" * 40)
++    for k, v in result.items():
++        print(f"  {k:<25} {v}")
++
++    if result.get("sharpe", 0) > 5:
++        print("\n  ⚠  Sharpe > 5 — possible look-ahead leakage. Audit before proceeding.")
++
++    if risk_manager.apply_kill_switch(equity_curve, config):
++        print("  ⚠  Kill-switch would have triggered during this period.")
++
++    plot_path = config["reporting"]["equity_curve_plot"]
++    metrics.plot_equity_curve(equity_curve, trades, plot_path, result)
++
++    _log_experiment(config, result)
++    print(f"\n  Experiment logged → {config['reporting']['experiment_log']}")
++
++    return result
++
++
++if __name__ == "__main__":
++    parser = argparse.ArgumentParser(description="cmoon trading pipeline")
++    parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
++    parser.add_argument(
++        "--split",
++        default="val",
++        choices=["val", "holdout"],
++        help="Evaluation split (use 'holdout' only once for final OOS simulation)",
++    )
++    args = parser.parse_args()
++    run_pipeline(config_path=args.config, eval_split=args.split)
+\ No newline at end of file

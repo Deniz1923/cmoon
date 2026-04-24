@@ -49,7 +49,8 @@ def load_all_data() -> dict[str, pd.DataFrame]:
 
     strategy = _Loader()
     strategy.get_data()
-    return {coin: df.copy() for coin, df in strategy._full_data.items()}
+    full = getattr(strategy, "_full_data", None) or strategy.coin_data
+    return {coin: df.copy() for coin, df in full.items()}
 
 
 def split_train_holdout(

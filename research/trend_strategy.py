@@ -40,54 +40,72 @@ class TrendStrategy(BaseStrategy):
         self._open_signals: dict[str, int] = {c: 0 for c in COINS}
 
     def predict(self, data: dict) -> list[dict]:
-        decisions = []
+        flat_decisions = []
+        candidates = []
 
         for coin in COINS:
             df = data[coin]
 
-            # Not enough data for indicators yet — stay flat
             if len(df) < MIN_CANDLES:
-                decisions.append({"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1})
+                flat_decisions.append({"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1})
                 continue
 
             decision = self._decide(coin, df)
-            decisions.append(decision)
+            if decision["signal"] != 0:
+                candidates.append(decision)
+            else:
+                flat_decisions.append(decision)
 
-        return decisions
+        # Max 2 active coins — set allocation based on actual active count
+        active = candidates[:2]
+        n_active = len(active)
+        for dec in active:
+            dec["allocation"] = position_allocation(n_active_coins=max(n_active, 1))
+
+        # Coins that didn't get a slot go flat
+        active_coins = {d["coin"] for d in active}
+        for dec in candidates[2:]:
+            dec["signal"] = 0
+            dec["allocation"] = 0.0
+            flat_decisions.append(dec)
+
+        # Preserve COINS order
+        decision_map = {d["coin"]: d for d in flat_decisions + active}
+        return [decision_map[coin] for coin in COINS]
 
     def _decide(self, coin: str, df: pd.DataFrame) -> dict:
-        # TODO: implement trend logic
-        #
-        # Step 1: compute indicators on df["Close"]
-        #   fast = ema(df["Close"], EMA_FAST)
-        #   slow = ema(df["Close"], EMA_SLOW)
-        #   current_atr = atr(df, ATR_PERIOD).iloc[-1]
-        #   current_atr_pct = atr_pct(df, ATR_PERIOD).iloc[-1]
-        #   current_bw = bb_width(df["Close"]).iloc[-1]
-        #
-        # Step 2: regime check
-        #   if current_bw < BB_TREND_THRESHOLD → not trending → signal = 0
-        #
-        # Step 3: trend signal
-        #   signal = +1 if fast[-1] > slow[-1] else -1
-        #
-        # Step 4: if signal matches self._open_signals[coin] → hold (re-state same signal, no TP/SL update)
-        #          if signal differs → flip (new TP/SL will be set by open_position)
-        #
-        # Step 5: build return dict
-        #   if signal == 0:
-        #       return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
-        #   else:
-        #       lev = dynamic_leverage(current_atr_pct)
-        #       entry = df["Close"].iloc[-1]
-        #       sl = stop_loss_price(entry, signal, current_atr, ATR_MULTIPLIER)
-        #       tp = take_profit_price(entry, signal, current_atr, RISK_REWARD, ATR_MULTIPLIER)
-        #       alloc = position_allocation(n_active_coins=2)  # TODO: count actual active coins
-        #       self._open_signals[coin] = signal
-        #       return {"coin": coin, "signal": signal, "allocation": alloc, "leverage": lev,
-        #               "stop_loss": sl, "take_profit": tp}
+        fast = ema(df["Close"], EMA_FAST)
+        slow = ema(df["Close"], EMA_SLOW)
+        current_atr = atr(df, ATR_PERIOD).iloc[-1]
+        current_atr_pct = atr_pct(df, ATR_PERIOD).iloc[-1]
+        current_bw = bb_width(df["Close"]).iloc[-1]
 
-        raise NotImplementedError("_decide() not implemented yet")
+        # Regime check — only trade in trending markets
+        if pd.isna(current_bw) or current_bw < BB_TREND_THRESHOLD:
+            return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
+
+        # Guard against bad ATR values
+        if pd.isna(current_atr) or current_atr <= 0 or pd.isna(current_atr_pct):
+            return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
+
+        # Trend signal from EMA crossover
+        signal = 1 if fast.iloc[-1] > slow.iloc[-1] else -1
+
+        lev = dynamic_leverage(float(current_atr_pct))
+        entry = float(df["Close"].iloc[-1])
+        sl = stop_loss_price(entry, signal, float(current_atr), ATR_MULTIPLIER)
+        tp = take_profit_price(entry, signal, float(current_atr), RISK_REWARD, ATR_MULTIPLIER)
+        alloc = position_allocation(n_active_coins=2)
+
+        self._open_signals[coin] = signal
+        return {
+            "coin": coin,
+            "signal": signal,
+            "allocation": alloc,
+            "leverage": lev,
+            "stop_loss": sl,
+            "take_profit": tp,
+        }
 
 
 # ---------------------------------------------------------------------------

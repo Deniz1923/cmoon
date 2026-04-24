@@ -107,7 +107,9 @@ def run_backtest_window(
             print(f"  Candle {i:>4}/{end_candle}  Portfolio: ${portfolio.portfolio_value:,.2f}")
 
     summary = portfolio.summary()
-    return BacktestResult(
+    import inspect as _inspect
+    _result_params = set(_inspect.signature(BacktestResult.__init__).parameters)
+    _kwargs: dict = dict(
         initial_capital=initial_capital,
         final_portfolio_value=summary["portfolio_value"],
         net_pnl=summary["net_pnl"],
@@ -118,11 +120,14 @@ def run_backtest_window(
         total_liquidation_loss=summary["total_liquidation_loss"],
         validation_errors=validation_errors,
         strategy_errors=strategy_errors,
-        failed_opens=failed_opens,
         portfolio_series=portfolio_series,
         trade_history=trade_history,
-        failed_open_history=failed_open_history,
     )
+    if "failed_opens" in _result_params:
+        _kwargs["failed_opens"] = failed_opens
+    if "failed_open_history" in _result_params:
+        _kwargs["failed_open_history"] = failed_open_history
+    return BacktestResult(**_kwargs)
 
 
 def _full_coin_data(strategy: BaseStrategy) -> dict:
