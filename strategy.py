@@ -21,6 +21,7 @@ from research.features import (
     bb_pct as _bb_pct,
     ema as _ema,
     rsi as _rsi,
+    volume_ratio as _volume_ratio,
 )
 from research.ml_features import build_features_single as _build_features_single
 from research.risk import (
@@ -73,7 +74,11 @@ class MyStrategy(BaseStrategy):
                 continue
 
             ml_prob_up = self._ml_prob(coin, data)
-            candidate = self._candidate_decision(coin, df, rule_signal, ml_prob_up)
+            try:
+                candidate = self._candidate_decision(coin, df, rule_signal, ml_prob_up)
+            except Exception as exc:
+                print(f"[MyStrategy] WARNING: _candidate_decision failed for {coin}: {type(exc).__name__}: {exc}")
+                candidate = None
             if candidate is not None:
                 candidates.append(candidate)
 
@@ -102,13 +107,28 @@ class MyStrategy(BaseStrategy):
         if pd.isna(current_bw):
             return 0
 
-        # Trending regime — EMA crossover
+        # Trending regime — EMA position + RSI momentum confirmation
         if current_bw > 0.08:
             fast = _ema(close, 20)
             slow = _ema(close, 50)
             if pd.isna(fast.iloc[-1]) or pd.isna(slow.iloc[-1]):
                 return 0
-            return 1 if fast.iloc[-1] > slow.iloc[-1] else -1
+            ema_signal = 1 if fast.iloc[-1] > slow.iloc[-1] else -1
+
+            # RSI momentum must agree with trend direction
+            rsi_val = _rsi(close).iloc[-1]
+            if not pd.isna(rsi_val):
+                if ema_signal == 1 and rsi_val < 50:
+                    return 0  # EMA bullish but RSI below midpoint — weakening trend
+                if ema_signal == -1 and rsi_val > 50:
+                    return 0  # EMA bearish but RSI above midpoint — weakening trend
+
+            # Skip very low-volume candles (likely false breakouts)
+            vol_r = _volume_ratio(df, 20).iloc[-1]
+            if not pd.isna(vol_r) and vol_r < 0.5:
+                return 0
+
+            return ema_signal
 
         # Ranging regime — RSI + BB position
         if current_bw < 0.06:
@@ -209,13 +229,30 @@ class MyStrategy(BaseStrategy):
 
         ml_signal = 1 if ml_prob_up > 0.5 else -1 if ml_prob_up < 0.5 else 0
         confidence = abs(ml_prob_up - 0.5) * 2.0
-        if ml_signal != rule_signal or confidence < self.__class__.ML_CONFIDENCE_THRESHOLD:
+
+        if ml_signal != rule_signal:
+            # ML disagrees on direction — always exit or skip entry
+            return None
+
+        # Holding an existing position in the same direction: relax confidence gate
+        # (don't prematurely close a trade just because ML became uncertain)
+        # New entries still require full confidence threshold
+        is_hold = (self._open_signals.get(coin, 0) == rule_signal)
+        if not is_hold and confidence < self.__class__.ML_CONFIDENCE_THRESHOLD:
             return None
 
         current_atr = _atr(df, ATR_PERIOD).iloc[-1]
         current_atr_pct = _atr_pct(df, ATR_PERIOD).iloc[-1]
         if pd.isna(current_atr) or pd.isna(current_atr_pct) or current_atr <= 0:
             return None
+
+        # Regime-aware risk/reward: let winners run in trends, take quick profits in ranges
+        close = df["Close"]
+        current_bw = _bb_width(close).iloc[-1]
+        if not pd.isna(current_bw) and current_bw > 0.08:
+            risk_reward = 3.0  # trending — hold for larger moves
+        else:
+            risk_reward = 1.5  # ranging — mean-revert targets are smaller
 
         entry = float(df["Close"].iloc[-1])
         lev = _dynamic_leverage(float(current_atr_pct))
@@ -225,7 +262,7 @@ class MyStrategy(BaseStrategy):
             "allocation": 0.0,
             "leverage": lev,
             "stop_loss": _stop_loss_price(entry, rule_signal, float(current_atr), leverage=lev),
-            "take_profit": _take_profit_price(entry, rule_signal, float(current_atr)),
+            "take_profit": _take_profit_price(entry, rule_signal, float(current_atr), risk_reward=risk_reward),
         }
         return {"decision": decision, "confidence": confidence}
 

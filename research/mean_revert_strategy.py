@@ -57,11 +57,11 @@ class MeanRevertStrategy(BaseStrategy):
             else:
                 flat_decisions.append(decision)
 
-        # Mean reversion: one coin at a time — highest ATR-filtered pick
+        # Mean reversion: one coin at a time, half allocation — counter-trend is higher risk
         active = candidates[:1]
         n_active = len(active)
         for dec in active:
-            dec["allocation"] = position_allocation(n_active_coins=max(n_active, 1))
+            dec["allocation"] = position_allocation(n_active_coins=max(n_active, 1), signal_strength=0.5)
 
         for dec in candidates[1:]:
             dec["signal"] = 0
@@ -109,7 +109,7 @@ class MeanRevertStrategy(BaseStrategy):
         entry = float(df["Close"].iloc[-1])
         sl = stop_loss_price(entry, signal, float(current_atr), ATR_MULTIPLIER)
         tp = take_profit_price(entry, signal, float(current_atr), RISK_REWARD, ATR_MULTIPLIER)
-        alloc = position_allocation(n_active_coins=1)
+        alloc = position_allocation(n_active_coins=1, signal_strength=0.5)  # 45% — counter-trend risk
 
         self._open_signals[coin] = signal
         return {
