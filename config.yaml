@@ -2,6 +2,15 @@ project:
   name: cmoon
   timezone: UTC
 
+# ── Data source ────────────────────────────────────────────────────────────────
+# provider: csv   → reads from paths.raw_data (e.g. data/raw/BTCUSDT_spot.csv)
+# provider: ccxt  → fetches live from exchange via ccxt; requires env vars
+data_source:
+  provider: csv
+  exchange: binance
+  api_key_env: BINANCE_API_KEY
+  secret_env: BINANCE_SECRET
+
 paths:
   raw_data: data/raw
   processed_data: data/processed
@@ -65,7 +74,10 @@ labels:
   take_profit: 0.02
   stop_loss: 0.01
   max_horizon_bars: 24
-  neutral_band: 0.0
+  # class_weight: balanced prevents RF/XGBoost from ignoring minority classes
+  class_weight: balanced
+  # Informational: log a warning if any class falls below this ratio
+  min_label_ratio: 0.10
 
 cross_validation:
   method: purged_walk_forward
