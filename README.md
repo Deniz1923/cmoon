@@ -31,7 +31,9 @@ cmoon/
 ## Non-Negotiables
 
 - `data_loader.py` is the only place that owns chronological train, validation, and holdout boundaries.
+- Competition symbols are discovered from raw data by default; no module may hardcode a coin name.
 - Every market DataFrame uses a UTC-aware `DatetimeIndex`.
+- Combined datasets use `symbol + timestamp` as the unique row identity.
 - Feature columns are prefixed with `feat_`.
 - Label columns are aligned to the same index and must drop rows where the forward target cannot be known.
 - Scalers, feature selectors, and model tuning are fit on training folds only.
@@ -50,9 +52,10 @@ cmoon/
 ## Workflow
 
 1. Freeze the `config.yaml` schema and DataFrame contracts before implementation starts.
-2. Build each pipeline slice against synthetic or stubbed upstream data.
-3. Merge only when contract tests pass.
-4. Tune only through purged walk-forward CV.
-5. Freeze the final config and model before the final retrain.
+2. Discover and validate the available coin universe from `data/raw/`.
+3. Build each pipeline slice against synthetic or stubbed upstream data.
+4. Merge only when contract tests pass.
+5. Tune only through purged walk-forward CV.
+6. Freeze the final config and model before the final retrain.
 
 See [docs/architecture.md](docs/architecture.md) for the full module contract and hackathon plan.
