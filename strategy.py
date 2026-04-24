@@ -75,6 +75,36 @@ class MyStrategy(BaseStrategy):
 
     def _rule_signal(self, coin: str, df: pd.DataFrame, data: dict) -> int:
         """Person 2 hook: return +1 long, -1 short, or 0 flat."""
+        if len(df) < MIN_FEATURE_ROWS:
+            return 0
+
+        close = df["Close"]
+        current_bw = _bb_width(close).iloc[-1]
+
+        if pd.isna(current_bw):
+            return 0
+
+        # Trending regime — EMA crossover
+        if current_bw > 0.08:
+            fast = _ema(close, 20)
+            slow = _ema(close, 50)
+            if pd.isna(fast.iloc[-1]) or pd.isna(slow.iloc[-1]):
+                return 0
+            return 1 if fast.iloc[-1] > slow.iloc[-1] else -1
+
+        # Ranging regime — RSI + BB position
+        if current_bw < 0.06:
+            rsi_val = _rsi(close).iloc[-1]
+            bb_pct_val = _bb_pct(close).iloc[-1]
+            if pd.isna(rsi_val) or pd.isna(bb_pct_val):
+                return 0
+            if rsi_val < 35 and bb_pct_val < 0.2:
+                return 1
+            if rsi_val > 65 and bb_pct_val > 0.8:
+                return -1
+            return 0
+
+        # Ambiguous regime — stay flat
         return 0
 
     def _load_models(self) -> None:

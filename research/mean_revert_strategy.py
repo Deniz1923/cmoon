@@ -43,46 +43,83 @@ class MeanRevertStrategy(BaseStrategy):
         self._open_signals: dict[str, int] = {c: 0 for c in COINS}
 
     def predict(self, data: dict) -> list[dict]:
-        decisions = []
+        flat_decisions = []
+        candidates = []
+
         for coin in COINS:
             df = data[coin]
             if len(df) < MIN_CANDLES:
-                decisions.append({"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1})
+                flat_decisions.append({"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1})
                 continue
-            decisions.append(self._decide(coin, df))
-        return decisions
+            decision = self._decide(coin, df)
+            if decision["signal"] != 0:
+                candidates.append(decision)
+            else:
+                flat_decisions.append(decision)
+
+        # Mean reversion: one coin at a time — highest ATR-filtered pick
+        active = candidates[:1]
+        n_active = len(active)
+        for dec in active:
+            dec["allocation"] = position_allocation(n_active_coins=max(n_active, 1))
+
+        for dec in candidates[1:]:
+            dec["signal"] = 0
+            dec["allocation"] = 0.0
+            flat_decisions.append(dec)
+
+        decision_map = {d["coin"]: d for d in flat_decisions + active}
+        return [decision_map[coin] for coin in COINS]
 
     def _decide(self, coin: str, df: pd.DataFrame) -> dict:
-        # TODO: implement mean reversion logic
-        #
-        # Step 1: compute indicators
-        #   current_rsi = rsi(df["Close"], RSI_PERIOD).iloc[-1]
-        #   current_bb_pct = bb_pct(df["Close"], BB_PERIOD).iloc[-1]
-        #   current_bw = bb_width(df["Close"], BB_PERIOD).iloc[-1]
-        #   current_atr = atr(df, ATR_PERIOD).iloc[-1]
-        #   current_atr_pct = atr_pct(df, ATR_PERIOD).iloc[-1]
-        #
-        # Step 2: regime gate — only trade when market is ranging
-        #   if current_bw > BB_RANGE_THRESHOLD:
-        #       return flat (trend strategy handles this regime)
-        #
-        # Step 3: entry signals (both conditions must agree)
-        #   long_signal  = current_rsi < RSI_OVERSOLD  and current_bb_pct < BB_PCTB_LOW
-        #   short_signal = current_rsi > RSI_OVERBOUGHT and current_bb_pct > BB_PCTB_HIGH
-        #
-        # Step 4: if already in a position and conditions no longer hold → close
-        #         if new signal fires → open with SL/TP
-        #
-        # Step 5: build return dict
-        #   leverage = min(dynamic_leverage(current_atr_pct), MAX_LEVERAGE)
-        #   entry = df["Close"].iloc[-1]
-        #   sl = stop_loss_price(entry, signal, current_atr, ATR_MULTIPLIER)
-        #   tp = take_profit_price(entry, signal, current_atr, RISK_REWARD, ATR_MULTIPLIER)
-        #   alloc = position_allocation(n_active_coins=1)  # mean reversion: one coin at a time
-        #   return {"coin": coin, "signal": signal, "allocation": alloc, "leverage": leverage,
-        #           "stop_loss": sl, "take_profit": tp}
+        current_rsi = rsi(df["Close"], RSI_PERIOD).iloc[-1]
+        current_bb_pct = bb_pct(df["Close"], BB_PERIOD).iloc[-1]
+        current_bw = bb_width(df["Close"], BB_PERIOD).iloc[-1]
+        current_atr = atr(df, ATR_PERIOD).iloc[-1]
+        current_atr_pct = atr_pct(df, ATR_PERIOD).iloc[-1]
 
-        raise NotImplementedError("_decide() not implemented yet")
+        # Regime gate — only trade in ranging markets
+        if pd.isna(current_bw) or current_bw > BB_RANGE_THRESHOLD:
+            self._open_signals[coin] = 0
+            return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
+
+        # Guard against bad indicator values
+        if pd.isna(current_rsi) or pd.isna(current_bb_pct):
+            self._open_signals[coin] = 0
+            return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
+
+        # Entry signals — both RSI and BB position must agree
+        long_signal  = current_rsi < RSI_OVERSOLD  and current_bb_pct < BB_PCTB_LOW
+        short_signal = current_rsi > RSI_OVERBOUGHT and current_bb_pct > BB_PCTB_HIGH
+
+        if long_signal:
+            signal = 1
+        elif short_signal:
+            signal = -1
+        else:
+            # Conditions no longer hold — close any open position
+            self._open_signals[coin] = 0
+            return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
+
+        if pd.isna(current_atr) or current_atr <= 0 or pd.isna(current_atr_pct):
+            self._open_signals[coin] = 0
+            return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
+
+        leverage = min(dynamic_leverage(float(current_atr_pct)), MAX_LEVERAGE)
+        entry = float(df["Close"].iloc[-1])
+        sl = stop_loss_price(entry, signal, float(current_atr), ATR_MULTIPLIER)
+        tp = take_profit_price(entry, signal, float(current_atr), RISK_REWARD, ATR_MULTIPLIER)
+        alloc = position_allocation(n_active_coins=1)
+
+        self._open_signals[coin] = signal
+        return {
+            "coin": coin,
+            "signal": signal,
+            "allocation": alloc,
+            "leverage": leverage,
+            "stop_loss": sl,
+            "take_profit": tp,
+        }
 
 
 if __name__ == "__main__":
