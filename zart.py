@@ -1,6 +1,16 @@
-import pandas
+from cnlib.base_strategy import BaseStrategy
 
-print(pandas.read_parquet(".venv/lib/python3.14/site-packages/cnlib/data/kapcoin-usd_train.parquet").to_string())
-print(pandas.read_parquet(".venv/lib/python3.14/site-packages/cnlib/data/tamcoin-usd_train.parquet").to_string())
-print(pandas.read_parquet(".venv/lib/python3.14/site-packages/cnlib/data/metucoin-usd_train.parquet").to_string())
+class MyStrategy(BaseStrategy):
+    def predict(self, data):
+        closes = data["kapcoin-usd_train"]["Close"]
 
+        if closes.iloc[-1] > closes.iloc[-2]:
+            signal = 1   # price went up → go long
+        else:
+            signal = -1  # price went down → go short
+
+        return [
+            {"coin": "kapcoin-usd_train",  "signal": signal, "allocation": 0.5, "leverage": 2},
+            {"coin": "metucoin-usd_train", "signal": 0,      "allocation": 0.0, "leverage": 1},
+            {"coin": "tamcoin-usd_train",  "signal": 0,      "allocation": 0.0, "leverage": 1},
+        ]
