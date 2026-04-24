@@ -1,17 +1,29 @@
 from contextlib import redirect_stdout
 from io import StringIO
 import math
+from pathlib import Path
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
-from pandas.testing import assert_index_equal, assert_series_equal
+from pandas.testing import assert_frame_equal, assert_index_equal, assert_series_equal
 
 from cnlib.base_strategy import BaseStrategy, COINS
+from cnlib.validator import validate
 from research import features
 from research.backtest_window import run_backtest_window
+from research.ml_features import (
+    build_X_y,
+    build_features_single,
+    feature_names,
+)
+from research.train_models import TRAIN_END_CANDLE, split_train_holdout
 from research.walk_forward import TEST_START, holdout_test, walk_forward
+from strategy import MyStrategy, _build_features_single as strategy_build_features_single
 
 
 def make_ohlcv(
@@ -226,9 +238,8 @@ class TestRunnerAndWalkForward(unittest.TestCase):
         self.assertIn("main", run.STRATEGIES)
         self.assertIn("ensemble", run.STRATEGIES)
         self.assertIsNotNone(run.get_strategy("main"))
+        self.assertIsNotNone(run.get_strategy("ensemble"))
 
-        with self.assertRaises(run.UnavailableStrategyError):
-            run.get_strategy("ensemble")
         with self.assertRaises(ValueError):
             run.get_strategy("missing")
 
@@ -250,7 +261,7 @@ class TestRunnerAndWalkForward(unittest.TestCase):
         self.assertTrue(all(r.test_end < TEST_START for r in results))
         self.assertTrue(all(max(strategy.calls) < TEST_START for strategy in strategies))
 
-    def test_holdout_test_starts_at_reserved_holdout(self):
+    def test_holdout_test_starts_at_configured_holdout(self):
         data = make_coin_data(TEST_START + 10)
         strategy = FlatStrategy(data)
 
@@ -274,6 +285,100 @@ class TestRunnerAndWalkForward(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("Total Candles", completed.stdout)
         self.assertIn("6", completed.stdout)
+
+
+class FixedProbModel:
+    classes_ = np.array([0, 1])
+
+    def __init__(self, prob_up: float):
+        self.prob_up = prob_up
+
+    def predict_proba(self, X):
+        return np.array([[1.0 - self.prob_up, self.prob_up] for _ in range(len(X))])
+
+
+class AlwaysLongStrategy(MyStrategy):
+    def _rule_signal(self, coin: str, df: pd.DataFrame, data: dict) -> int:
+        return 1
+
+
+class TestPerson3Ensemble(unittest.TestCase):
+    def test_missing_model_artifacts_return_valid_flat_decisions(self):
+        with TemporaryDirectory() as tmp:
+            with patch("strategy.RESULTS_DIR", Path(tmp)):
+                strategy = MyStrategy()
+
+        decisions = strategy.predict(make_coin_data(140))
+
+        validate(decisions)
+        self.assertEqual([d["signal"] for d in decisions], [0, 0, 0])
+        self.assertEqual([d["allocation"] for d in decisions], [0.0, 0.0, 0.0])
+
+    def test_ensemble_caps_active_positions_and_total_allocation(self):
+        strategy = AlwaysLongStrategy()
+        strategy.models = {coin: FixedProbModel(0.99) for coin in COINS}
+        strategy.model_feature_names = {}
+
+        decisions = strategy.predict(make_coin_data(140))
+        active = [d for d in decisions if d["signal"] != 0]
+
+        validate(decisions)
+        self.assertLessEqual(len(active), 2)
+        self.assertLessEqual(sum(d["allocation"] for d in active), 0.9)
+        self.assertTrue(all(d["allocation"] == 0.45 for d in active))
+
+    def test_inference_feature_order_matches_training_features(self):
+        data = make_coin_data(140)
+        strategy = MyStrategy()
+
+        for coin in COINS:
+            self.assertEqual(strategy._feature_names(data, coin), feature_names(data, coin))
+
+    def test_inference_feature_values_match_training_features(self):
+        data = make_coin_data(140)
+
+        for coin in COINS:
+            leader = data["kapcoin-usd_train"]["Close"] if coin != "kapcoin-usd_train" else None
+            assert_frame_equal(
+                strategy_build_features_single(data[coin], leader_close=leader),
+                build_features_single(data[coin], leader_close=leader),
+            )
+
+    def test_inference_rejects_invalid_current_feature_row(self):
+        data = make_coin_data(140)
+        last = data["kapcoin-usd_train"].index[-1]
+        data["kapcoin-usd_train"].loc[last, ["Open", "High", "Low", "Close"]] = 0.0
+
+        with TemporaryDirectory() as tmp:
+            with patch("strategy.RESULTS_DIR", Path(tmp)):
+                strategy = MyStrategy()
+
+        self.assertIsNone(strategy._ml_feature_row("kapcoin-usd_train", data))
+
+    def test_build_x_y_skips_warmup_rows_even_for_short_inputs(self):
+        X, y, valid_index = build_X_y(make_coin_data(60), "kapcoin-usd_train")
+
+        self.assertEqual(X.shape[0], 0)
+        self.assertEqual(len(y), 0)
+        self.assertEqual(len(valid_index), 0)
+
+    def test_train_holdout_split_uses_candle_index_not_row_count(self):
+        X = np.arange(20, dtype=np.float32).reshape(5, 4)
+        y = np.array([0, 1, 0, 1, 1])
+        valid_index = pd.Index([100, TRAIN_END_CANDLE - 1, TRAIN_END_CANDLE, 1200, 1300])
+
+        X_train, y_train, X_test, y_test, train_index, test_index = split_train_holdout(
+            X,
+            y,
+            valid_index,
+        )
+
+        self.assertEqual(list(train_index), [100, TRAIN_END_CANDLE - 1])
+        self.assertEqual(list(test_index), [TRAIN_END_CANDLE, 1200, 1300])
+        self.assertEqual(len(X_train), 2)
+        self.assertEqual(len(y_train), 2)
+        self.assertEqual(len(X_test), 3)
+        self.assertEqual(len(y_test), 3)
 
 
 if __name__ == "__main__":

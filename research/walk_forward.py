@@ -142,7 +142,7 @@ def walk_forward(
 
 
 if __name__ == "__main__":
-    # TODO: replace TrendStrategy with whichever strategy you're testing
+    # Default demo strategy; import a different strategy here for local trials.
     from research.trend_strategy import TrendStrategy
 
     print("=== Walk-forward (train window) ===")

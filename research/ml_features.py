@@ -14,8 +14,7 @@ from research.features import (
     momentum, volume_ratio, lead_lag_signal, rolling_correlation,
 )
 
-# How many candles ahead to predict (target horizon)
-# TODO: experiment with 1, 3, 5
+# Baseline forecast horizon used by train_models.py and strategy.py.
 TARGET_HORIZON = 3
 
 # Minimum rows needed before the first valid feature row
@@ -32,8 +31,8 @@ def build_features_single(df: pd.DataFrame, leader_close: pd.Series | None = Non
     Returns a DataFrame aligned with df's index. Rows with NaN are included —
     caller should drop them after aligning across all coins.
 
-    TODO: add / remove features based on importance scores from train_models.py.
-          Fewer, higher-quality features beat many weak ones.
+    The column order is part of the training/inference contract. If features
+    are changed later, retrain models and regenerate saved bundles.
     """
     close = df["Close"]
     feat = pd.DataFrame(index=df.index)
@@ -84,8 +83,7 @@ def build_X_y(
     y: 1D int array, 1 if price rises over horizon candles, 0 if falls
     valid_index: original DataFrame index for the valid rows (for time-series split)
 
-    TODO: consider a 3-class target (-1, 0, +1) with a dead-zone around 0
-          to avoid trading on ambiguous signals.
+    The baseline target is binary: 1 if price rises over the horizon, else 0.
     """
     df = coin_data[target_coin]
 
@@ -102,8 +100,7 @@ def build_X_y(
     combined = pd.concat([feat, future_return.rename("future_return"), y_raw.rename("target")], axis=1)
     combined = combined.dropna()
 
-    if len(combined) > MIN_ROWS:
-        combined = combined.iloc[MIN_ROWS:]
+    combined = combined.iloc[MIN_ROWS:]
 
     X = combined.drop(columns=["future_return", "target"]).values.astype(np.float32)
     y = combined["target"].values.astype(int)
@@ -117,4 +114,4 @@ def feature_names(coin_data: dict, target_coin: str) -> list[str]:
     df = coin_data[target_coin]
     leader = coin_data["kapcoin-usd_train"]["Close"] if target_coin != "kapcoin-usd_train" else None
     feat = build_features_single(df, leader_close=leader)
-    return list(feat.dropna().columns)
+    return list(feat.columns)

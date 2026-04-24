@@ -23,10 +23,6 @@ from research.backtest_window import run_backtest_window
 StrategyFactory = Callable[[], BaseStrategy]
 
 
-class UnavailableStrategyError(ValueError):
-    pass
-
-
 def _main_strategy() -> BaseStrategy:
     from strategy import MyStrategy
     return MyStrategy()
@@ -42,12 +38,11 @@ def _mean_revert_strategy() -> BaseStrategy:
     return MeanRevertStrategy()
 
 
-STRATEGIES: dict[str, StrategyFactory | None] = {
+STRATEGIES: dict[str, StrategyFactory] = {
     "main": _main_strategy,
     "trend": _trend_strategy,
     "meanrevert": _mean_revert_strategy,
-    # Reserved for Person 3's final ensemble implementation.
-    "ensemble": None,
+    "ensemble": _main_strategy,
 }
 
 
@@ -56,10 +51,6 @@ def get_strategy(name: str):
     if name not in STRATEGIES:
         available = ", ".join(STRATEGIES)
         raise ValueError(f"Unknown strategy '{name}'. Available: {available}")
-    if factory is None:
-        raise UnavailableStrategyError(
-            f"Strategy '{name}' is reserved but not implemented yet."
-        )
     return factory()
 
 
@@ -112,14 +103,13 @@ def main():
     args = parser.parse_args()
 
     if args.list_strategies:
-        for name, factory in STRATEGIES.items():
-            status = "ready" if factory is not None else "reserved"
-            print(f"{name}\t{status}")
+        for name in STRATEGIES:
+            print(f"{name}\tready")
         return
 
     try:
         strategy = get_strategy(args.strategy)
-    except (ValueError, UnavailableStrategyError) as exc:
+    except ValueError as exc:
         print(exc, file=sys.stderr)
         sys.exit(2)
 
