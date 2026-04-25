@@ -34,6 +34,10 @@ from research.risk import (
 COINS = ["kapcoin-usd_train", "metucoin-usd_train", "tamcoin-usd_train"]
 MODEL_DIR = Path(__file__).parent / "models"
 
+# Allow evaluators to pass data without the "_train" suffix.
+_COIN_ALIASES: dict[str, str] = {c.replace("-usd_train", "-usd"): c for c in COINS}
+_OHLCV_LOWER = {"open", "high", "low", "close", "volume"}
+
 MIN_FEATURE_ROWS = 55
 TARGET_HORIZON = 3
 MAX_ACTIVE_COINS = 2
@@ -60,7 +64,19 @@ class MyStrategy(BaseStrategy):
         self.model_metadata: dict[str, dict] = {}
         self._load_models()
 
+    def _normalize_data(self, data: dict) -> dict:
+        normalized = {}
+        for key, df in data.items():
+            canonical = _COIN_ALIASES.get(key, key)
+            if df is not None and hasattr(df, "columns"):
+                rename = {c: c.title() for c in df.columns if c.lower() in _OHLCV_LOWER and c != c.title()}
+                if rename:
+                    df = df.rename(columns=rename)
+            normalized[canonical] = df
+        return normalized
+
     def predict(self, data: dict) -> list[dict]:
+        data = self._normalize_data(data)
         candidates = []
         decisions = {coin: _flat(coin) for coin in COINS}
 
@@ -211,7 +227,8 @@ class MyStrategy(BaseStrategy):
         if df is None:
             return None
 
-        leader = data["kapcoin-usd_train"]["Close"] if coin != "kapcoin-usd_train" else None
+        kap_df = data.get("kapcoin-usd_train")
+        leader = kap_df["Close"] if (coin != "kapcoin-usd_train" and kap_df is not None) else None
         features = _build_features_single(df, leader_close=leader)
         features = features.replace([np.inf, -np.inf], np.nan)
         if len(features.dropna()) <= MIN_FEATURE_ROWS:
