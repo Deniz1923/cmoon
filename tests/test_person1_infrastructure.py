@@ -1,7 +1,9 @@
+import atexit
 from contextlib import redirect_stdout
 from io import StringIO
 import math
 from pathlib import Path
+import pickle
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -14,7 +16,7 @@ from pandas.testing import assert_frame_equal, assert_index_equal, assert_series
 
 from cnlib.base_strategy import BaseStrategy, COINS
 from cnlib.validator import validate
-from research import features
+from research import features, risk
 from research.backtest_window import run_backtest_window
 from research.ml_features import (
     TARGET_HORIZON,
@@ -24,7 +26,27 @@ from research.ml_features import (
 )
 from research.train_models import TRAIN_END_CANDLE, split_train_holdout
 from research.walk_forward import TEST_START, holdout_test, walk_forward
+import strategy as strategy_module
 from strategy import MyStrategy, _build_features_single as strategy_build_features_single
+
+
+TEST_SUMMARY: dict[str, object] = {}
+
+
+def record_test_value(key: str, value: object) -> None:
+    TEST_SUMMARY[key] = value
+
+
+def print_test_summary() -> None:
+    if not TEST_SUMMARY:
+        return
+
+    print("\n=== Test Summary ===")
+    for key in sorted(TEST_SUMMARY):
+        print(f"{key}: {TEST_SUMMARY[key]}")
+
+
+atexit.register(print_test_summary)
 
 
 def make_ohlcv(
@@ -101,6 +123,20 @@ class LiquidationOnlyStrategy(DataBackedStrategy):
             {"coin": "metucoin-usd_train", "signal": 0, "allocation": 0.0, "leverage": 1},
             {"coin": "tamcoin-usd_train", "signal": 0, "allocation": 0.0, "leverage": 1},
         ]
+
+
+class RecordingProbModel:
+    classes_ = np.array([0, 1])
+
+    def __init__(self, prob_up: float):
+        self.prob_up = prob_up
+        self.last_X: np.ndarray | None = None
+        self.call_count = 0
+
+    def predict_proba(self, X):
+        self.call_count += 1
+        self.last_X = np.array(X, copy=True)
+        return np.array([[1.0 - self.prob_up, self.prob_up] for _ in range(len(X))])
 
 
 class TestFeatures(unittest.TestCase):
@@ -302,6 +338,26 @@ class TestRunnerAndWalkForward(unittest.TestCase):
         self.assertIn("6", completed.stdout)
 
 
+class TestRisk(unittest.TestCase):
+    def test_dynamic_leverage_uses_documented_threshold_branches(self):
+        observed = {
+            0.0749: risk.dynamic_leverage(0.0749),
+            0.0750: risk.dynamic_leverage(0.0750),
+            0.0999: risk.dynamic_leverage(0.0999),
+            0.1000: risk.dynamic_leverage(0.1000),
+            0.1239: risk.dynamic_leverage(0.1239),
+            0.1240: risk.dynamic_leverage(0.1240),
+        }
+
+        self.assertEqual(observed[0.0749], 5)
+        self.assertEqual(observed[0.0750], 3)
+        self.assertEqual(observed[0.0999], 3)
+        self.assertEqual(observed[0.1000], 2)
+        self.assertEqual(observed[0.1239], 2)
+        self.assertEqual(observed[0.1240], 1)
+        record_test_value("dynamic_leverage_thresholds", observed)
+
+
 class FixedProbModel:
     classes_ = np.array([0, 1])
 
@@ -318,6 +374,38 @@ class AlwaysLongStrategy(MyStrategy):
 
 
 class TestPerson3Ensemble(unittest.TestCase):
+    def test_ranging_regime_returns_long_at_oversold_band_extreme(self):
+        strategy = MyStrategy()
+        data = make_coin_data(60)
+        df = data["kapcoin-usd_train"]
+        inputs = {"bb_width": 0.05, "rsi": 30.0, "bb_pct": 0.1}
+
+        with (
+            patch.object(strategy_module, "_bb_width", return_value=pd.Series([inputs["bb_width"]], index=[df.index[-1]])),
+            patch.object(strategy_module, "_rsi", return_value=pd.Series([inputs["rsi"]], index=[df.index[-1]])),
+            patch.object(strategy_module, "_bb_pct", return_value=pd.Series([inputs["bb_pct"]], index=[df.index[-1]])),
+        ):
+            signal = strategy._rule_signal("kapcoin-usd_train", df, data)
+
+        self.assertEqual(signal, 1)
+        record_test_value("ranging_long_case", {**inputs, "signal": signal})
+
+    def test_ranging_regime_returns_short_at_overbought_band_extreme(self):
+        strategy = MyStrategy()
+        data = make_coin_data(60)
+        df = data["kapcoin-usd_train"]
+        inputs = {"bb_width": 0.05, "rsi": 70.0, "bb_pct": 0.9}
+
+        with (
+            patch.object(strategy_module, "_bb_width", return_value=pd.Series([inputs["bb_width"]], index=[df.index[-1]])),
+            patch.object(strategy_module, "_rsi", return_value=pd.Series([inputs["rsi"]], index=[df.index[-1]])),
+            patch.object(strategy_module, "_bb_pct", return_value=pd.Series([inputs["bb_pct"]], index=[df.index[-1]])),
+        ):
+            signal = strategy._rule_signal("kapcoin-usd_train", df, data)
+
+        self.assertEqual(signal, -1)
+        record_test_value("ranging_short_case", {**inputs, "signal": signal})
+
     def test_missing_model_artifacts_return_valid_flat_decisions(self):
         with TemporaryDirectory() as tmp:
             with patch("strategy.MODEL_DIR", Path(tmp)):
@@ -370,6 +458,47 @@ class TestPerson3Ensemble(unittest.TestCase):
                 strategy = MyStrategy()
 
         self.assertIsNone(strategy._ml_feature_row("kapcoin-usd_train", data))
+
+    def test_loaded_model_inference_reindexes_features_before_predict_proba(self):
+        data = make_coin_data(140)
+        base_features = build_features_single(data["kapcoin-usd_train"])
+        feature_names_reversed = list(reversed(base_features.columns))
+        expected_row = (
+            base_features.iloc[[-1]]
+            .reindex(columns=feature_names_reversed)
+            .to_numpy(dtype=np.float32)
+        )
+
+        payload = {
+            "estimator": RecordingProbModel(0.99),
+            "feature_names": feature_names_reversed,
+        }
+
+        with TemporaryDirectory() as tmp:
+            model_path = Path(tmp) / "model_kapcoin_usd_train.pkl"
+            with open(model_path, "wb") as f:
+                pickle.dump(payload, f)
+
+            with patch("strategy.MODEL_DIR", Path(tmp)):
+                strategy = AlwaysLongStrategy()
+
+            decisions = strategy.predict(data)
+
+        model = strategy.models["kapcoin-usd_train"]
+        self.assertEqual(model.call_count, 1)
+        np.testing.assert_allclose(model.last_X, expected_row)
+        self.assertEqual(
+            next(d for d in decisions if d["coin"] == "kapcoin-usd_train")["signal"],
+            1,
+        )
+        record_test_value(
+            "loaded_model_inference",
+            {
+                "feature_count": int(expected_row.shape[1]),
+                "predict_proba_calls": model.call_count,
+                "signal": 1,
+            },
+        )
 
     def test_build_x_y_skips_warmup_rows_even_for_short_inputs(self):
         X, y, valid_index = build_X_y(make_coin_data(60), "kapcoin-usd_train")
