@@ -107,8 +107,14 @@ class MeanRevertStrategy(BaseStrategy):
 
         leverage = min(dynamic_leverage(float(current_atr_pct)), MAX_LEVERAGE)
         entry = float(df["Close"].iloc[-1])
+        if entry <= 0:
+            self._open_signals[coin] = 0
+            return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
         sl = stop_loss_price(entry, signal, float(current_atr), ATR_MULTIPLIER)
         tp = take_profit_price(entry, signal, float(current_atr), RISK_REWARD, ATR_MULTIPLIER)
+        if sl <= 0 or tp <= 0:
+            self._open_signals[coin] = 0
+            return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
         alloc = position_allocation(n_active_coins=1, signal_strength=0.5)  # 45% — counter-trend risk
 
         self._open_signals[coin] = signal

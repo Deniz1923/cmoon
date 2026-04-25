@@ -1,11 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ChangeListManager">
-    <list default="true" id="5e57150d-4733-4c1b-ac0b-f5ac989f0f86" name="Changes" comment="">
+    <list default="true" id="5e57150d-4733-4c1b-ac0b-f5ac989f0f86" name="Changes" comment="sex on the beach">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/research/mean_revert_strategy.py" beforeDir="false" afterPath="$PROJECT_DIR$/research/mean_revert_strategy.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/run.py" beforeDir="false" afterPath="$PROJECT_DIR$/run.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/strategy.py" beforeDir="false" afterPath="$PROJECT_DIR$/strategy.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/research/train_models.py" beforeDir="false" afterPath="$PROJECT_DIR$/research/train_models.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -70,8 +68,25 @@
       <updated>1777047693144</updated>
       <workItem from="1777047694228" duration="114000" />
       <workItem from="1777047816422" duration="5961000" />
-      <workItem from="1777058990026" duration="5463000" />
+      <workItem from="1777058990026" duration="9257000" />
     </task>
+    <task id="LOCAL-00001" summary="sex">
+      <option name="closed" value="true" />
+      <created>1777070197819</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1777070197819</updated>
+    </task>
+    <task id="LOCAL-00002" summary="sex on the beach">
+      <option name="closed" value="true" />
+      <created>1777073160519</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1777073160519</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -93,7 +108,12 @@
       </map>
     </option>
   </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="sex" />
+    <MESSAGE value="sex on the beach" />
+    <option name="LAST_COMMIT_MESSAGE" value="sex on the beach" />
+  </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
-    <SUITE FILE_PATH="coverage/cmoon$run.coverage" NAME="run Coverage Results" MODIFIED="1777070075178" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/cmoon$run.coverage" NAME="run Coverage Results" MODIFIED="1777073076791" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
 </project>

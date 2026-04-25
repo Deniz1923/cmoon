@@ -13,9 +13,30 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+
+# XGBoost requires libomp on macOS (`brew install libomp`).
+# Fall back to sklearn's GradientBoostingClassifier if not available.
+try:
+    from xgboost import XGBClassifier as _BoostEstimator
+    _BOOST_NAME = "XGBoost"
+
+    def _make_boost_estimator():
+        return _BoostEstimator(
+            objective="binary:logistic",
+            random_state=42,
+            n_jobs=-1,
+            verbosity=0,
+        )
+
+except Exception:
+    _BoostEstimator = GradientBoostingClassifier
+    _BOOST_NAME = "GradientBoosting (sklearn — install libomp for XGBoost)"
+
+    def _make_boost_estimator():
+        return GradientBoostingClassifier(random_state=42)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -34,13 +55,40 @@ MODEL_DIR = ROOT_DIR / "models"
 RESULTS_DIR = ROOT_DIR / "results"
 MODEL_DIR.mkdir(exist_ok=True)
 
-MODEL_FORMAT_VERSION = 1
-TRAIN_END_CANDLE = 1100
-PARAM_GRID = {
+MODEL_FORMAT_VERSION = 2
+TRAIN_END_CANDLE = 1100  # dev: 1100, final submit öncesi 9999 yap
+
+RF_PARAM_GRID = {
     "n_estimators": [100, 200, 500],
-    "max_depth": [3, 5, 8, None],
+    "max_depth": [3, 5, 8],        # None kaldırıldı — overfit'in ana nedeni
     "min_samples_leaf": [5, 10, 20],
+    "max_features": ["sqrt", 0.5],
 }
+
+# XGBoost grid — used when XGBoost is importable
+XGB_PARAM_GRID = {
+    "max_depth": [3, 4, 6],
+    "n_estimators": [200, 500],
+    "learning_rate": [0.05, 0.1],
+    "subsample": [0.7, 0.9],
+    "colsample_bytree": [0.7, 1.0],
+    "reg_lambda": [1.0, 5.0],
+    "min_child_weight": [5, 10],
+}
+
+# sklearn GradientBoosting grid — fallback when libomp is not installed
+GBT_PARAM_GRID = {
+    "n_estimators": [200, 500],
+    "max_depth": [3, 5],
+    "learning_rate": [0.05, 0.1],
+    "subsample": [0.8],
+    "min_samples_leaf": [10, 20],
+}
+
+BOOST_PARAM_GRID = XGB_PARAM_GRID if _BOOST_NAME == "XGBoost" else GBT_PARAM_GRID
+
+# EnsembleModel ayrı modülde — pickle __main__ sorunundan kaçınmak için
+from research.ensemble_model import EnsembleModel  # noqa: E402
 
 
 def load_all_data() -> dict[str, pd.DataFrame]:
@@ -117,16 +165,35 @@ def train_coin_model(
 
     n_splits = min(4, max(len(X_train) // 150, 2))
     cv = TimeSeriesSplit(n_splits=n_splits)
-    search = GridSearchCV(
+
+    # --- RandomForest (roc_auc scoring, no max_depth=None) ---
+    rf_search = GridSearchCV(
         estimator=RandomForestClassifier(random_state=42, n_jobs=-1),
-        param_grid=PARAM_GRID,
-        scoring="f1",
+        param_grid=RF_PARAM_GRID,
+        scoring="roc_auc",
         cv=cv,
         n_jobs=1,
         refit=True,
     )
-    search.fit(X_train, y_train)
-    model = search.best_estimator_
+    rf_search.fit(X_train, y_train)
+    best_rf = rf_search.best_estimator_
+    print(f"  RF  best params: {rf_search.best_params_}  CV AUC: {rf_search.best_score_:.4f}")
+
+    # --- Boost model (XGBoost if libomp available, else GradientBoosting) ---
+    xgb_search = GridSearchCV(
+        estimator=_make_boost_estimator(),
+        param_grid=BOOST_PARAM_GRID,
+        scoring="roc_auc",
+        cv=cv,
+        n_jobs=1,
+        refit=True,
+    )
+    xgb_search.fit(X_train, y_train)
+    best_xgb = xgb_search.best_estimator_
+    print(f"  {_BOOST_NAME} best params: {xgb_search.best_params_}  CV AUC: {xgb_search.best_score_:.4f}")
+
+    # --- Ensemble: average probabilities ---
+    model = EnsembleModel(rf=best_rf, boost=best_xgb)
 
     train_pred = model.predict(X_train)
     train_prob = _positive_prob(model, X_train)
@@ -139,8 +206,10 @@ def train_coin_model(
         holdout_metrics = evaluate_predictions(y_test, test_pred, test_prob)
 
     metrics = {
-        "cv_best_params": search.best_params_,
-        "cv_best_f1": float(search.best_score_),
+        "cv_best_rf_params": rf_search.best_params_,
+        "cv_best_rf_auc": float(rf_search.best_score_),
+        "cv_best_xgb_params": xgb_search.best_params_,
+        "cv_best_xgb_auc": float(xgb_search.best_score_),
         "train": train_metrics,
         "holdout": holdout_metrics,
         "train_samples": int(len(X_train)),
@@ -151,11 +220,9 @@ def train_coin_model(
         "holdout_index_end": int(test_index.max()) if len(test_index) else None,
     }
 
-    print(f"  Best params: {search.best_params_}")
-    print(f"  Best CV F1: {search.best_score_:.4f}")
-    _print_metrics("Train metrics", train_metrics)
+    _print_metrics("Ensemble train", train_metrics)
     if holdout_metrics:
-        _print_metrics("Holdout metrics", holdout_metrics)
+        _print_metrics("Ensemble holdout", holdout_metrics)
 
     return model, X_test, y_test, metrics
 
