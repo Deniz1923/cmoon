@@ -131,6 +131,7 @@ def main():
     parser.add_argument("--list-datasets", action="store_true", help="show dataset presets and exit")
     parser.add_argument("--plot",     action="store_true")
     parser.add_argument("--silent",   action="store_true")
+    parser.add_argument("--verbose",  action="store_true")
     args = parser.parse_args()
 
     if args.list_strategies:
@@ -167,6 +168,7 @@ def main():
         end_candle=args.end,
         data_dir=data_dir,
         silent=args.silent,
+        verbose=args.verbose,
     )
     result.print_summary()
 

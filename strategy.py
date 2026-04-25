@@ -66,6 +66,8 @@ class MyStrategy(BaseStrategy):
         self.models: dict[str, object] = {}
         self.model_feature_names: dict[str, list[str]] = {}
         self.model_metadata: dict[str, dict] = {}
+        self._verbose: bool = False
+        self._verbose_log: dict = {}
         self._load_models()
 
     def _normalize_data(self, data: dict) -> dict:
@@ -83,24 +85,32 @@ class MyStrategy(BaseStrategy):
         data = self._normalize_data(data)
         candidates = []
         decisions = {coin: _flat(coin) for coin in COINS}
+        _verbose = self._verbose
+        if _verbose:
+            self._verbose_log = {}
 
         for coin in COINS:
             df = data.get(coin)
             if df is None:
+                if _verbose:
+                    self._verbose_log[coin] = {"has_data": False, "rule_signal": 0}
                 continue
 
             rule_signal = self._rule_signal(coin, df, data)
-            if rule_signal == 0:
-                continue
+            ml_prob_up = None
+            candidate = None
 
-            ml_prob_up = self._ml_prob(coin, data)
-            try:
-                candidate = self._candidate_decision(coin, df, rule_signal, ml_prob_up)
-            except Exception as exc:
-                print(f"[MyStrategy] WARNING: _candidate_decision failed for {coin}: {type(exc).__name__}: {exc}")
-                candidate = None
-            if candidate is not None:
-                candidates.append(candidate)
+            if rule_signal != 0:
+                ml_prob_up = self._ml_prob(coin, data)
+                try:
+                    candidate = self._candidate_decision(coin, df, rule_signal, ml_prob_up)
+                except Exception as exc:
+                    print(f"[MyStrategy] WARNING: _candidate_decision failed for {coin}: {type(exc).__name__}: {exc}")
+                if candidate is not None:
+                    candidates.append(candidate)
+
+            if _verbose:
+                self._verbose_log[coin] = self._explain_coin(coin, df, data, rule_signal, ml_prob_up, candidate)
 
         candidates.sort(key=lambda item: item["confidence"], reverse=True)
         active = candidates[:MAX_ACTIVE_COINS]
@@ -117,6 +127,12 @@ class MyStrategy(BaseStrategy):
                     min(weight * MAX_TOTAL_ALLOCATION, MAX_TOTAL_ALLOCATION), 4
                 )
                 decisions[candidate["decision"]["coin"]] = candidate["decision"]
+
+        if _verbose:
+            for coin in COINS:
+                if coin not in self._verbose_log:
+                    self._verbose_log[coin] = {"has_data": True, "rule_signal": 0}
+                self._verbose_log[coin]["final_decision"] = decisions[coin]
 
         # Order closes before opens so the engine frees cash before
         # attempting new entries (prevents failed opens from cash timing).
