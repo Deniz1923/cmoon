@@ -340,17 +340,19 @@ class TestRunnerAndWalkForward(unittest.TestCase):
 
 class TestRisk(unittest.TestCase):
     def test_dynamic_leverage_uses_documented_threshold_branches(self):
+        # 5x threshold lowered from 7.5% to 6.5% to ensure 1×ATR gap buffer
+        # between stop (2×ATR) and liquidation (1/leverage) distance.
         observed = {
-            0.0749: risk.dynamic_leverage(0.0749),
-            0.0750: risk.dynamic_leverage(0.0750),
+            0.0649: risk.dynamic_leverage(0.0649),
+            0.0650: risk.dynamic_leverage(0.0650),
             0.0999: risk.dynamic_leverage(0.0999),
             0.1000: risk.dynamic_leverage(0.1000),
             0.1239: risk.dynamic_leverage(0.1239),
             0.1240: risk.dynamic_leverage(0.1240),
         }
 
-        self.assertEqual(observed[0.0749], 5)
-        self.assertEqual(observed[0.0750], 3)
+        self.assertEqual(observed[0.0649], 5)
+        self.assertEqual(observed[0.0650], 3)
         self.assertEqual(observed[0.0999], 3)
         self.assertEqual(observed[0.1000], 2)
         self.assertEqual(observed[0.1239], 2)
