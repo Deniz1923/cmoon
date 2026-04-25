@@ -56,7 +56,7 @@ RESULTS_DIR = ROOT_DIR / "results"
 MODEL_DIR.mkdir(exist_ok=True)
 
 MODEL_FORMAT_VERSION = 2
-TRAIN_END_CANDLE = 9999  # train on all available data for final submission, was 1100 before
+TRAIN_END_CANDLE = 1100  # train on all available data for final submission, was 1100 before
 
 RF_PARAM_GRID = {
     "n_estimators": [100, 200, 500],
