@@ -98,7 +98,10 @@ class MyStrategy(BaseStrategy):
                 )
                 decisions[candidate["decision"]["coin"]] = candidate["decision"]
 
+        # Order closes before opens so the engine frees cash before
+        # attempting new entries (prevents failed opens from cash timing).
         ordered = [decisions[coin] for coin in COINS]
+        ordered.sort(key=lambda d: (d["signal"] != 0, d["coin"]))
         self._open_signals = {d["coin"]: d["signal"] for d in ordered}
         return ordered
 
