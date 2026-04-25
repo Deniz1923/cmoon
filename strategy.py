@@ -190,6 +190,76 @@ class MyStrategy(BaseStrategy):
         # Ambiguous regime — stay flat
         return 0
 
+    def _explain_coin(
+        self,
+        coin: str,
+        df: pd.DataFrame,
+        data: dict,
+        rule_signal: int,
+        ml_prob_up: float | None,
+        candidate: dict | None,
+    ) -> dict:
+        """Collect per-coin reasoning for verbose backtesting output. Only called when _verbose=True."""
+        info: dict = {"has_data": True, "rule_signal": rule_signal}
+
+        if len(df) < MIN_FEATURE_ROWS:
+            info["insufficient_data"] = True
+            return info
+
+        close = df["Close"]
+        bb_w = _bb_width(close).iloc[-1]
+        info["bb_width"] = float(bb_w) if not pd.isna(bb_w) else None
+
+        if pd.isna(bb_w):
+            info["regime"] = None
+        elif bb_w > 0.08:
+            info["regime"] = "trending"
+            fast = _ema(close, 20).iloc[-1]
+            slow = _ema(close, 50).iloc[-1]
+            info["ema_fast"] = float(fast) if not pd.isna(fast) else None
+            info["ema_slow"] = float(slow) if not pd.isna(slow) else None
+            rsi_v = _rsi(close).iloc[-1]
+            info["rsi"] = float(rsi_v) if not pd.isna(rsi_v) else None
+            vol_r = _volume_ratio(df, 20).iloc[-1]
+            info["vol_ratio"] = float(vol_r) if not pd.isna(vol_r) else None
+        elif bb_w < 0.06:
+            info["regime"] = "ranging"
+            rsi_v = _rsi(close).iloc[-1]
+            info["rsi"] = float(rsi_v) if not pd.isna(rsi_v) else None
+            bp = _bb_pct(close).iloc[-1]
+            info["bb_pct"] = float(bp) if not pd.isna(bp) else None
+        else:
+            info["regime"] = "ambiguous"
+
+        info["ml_available"] = coin in self.models
+        info["ml_prob_up"] = ml_prob_up
+
+        if ml_prob_up is not None:
+            ml_sig = 1 if ml_prob_up > 0.5 else -1 if ml_prob_up < 0.5 else 0
+            conf = abs(ml_prob_up - 0.5) * 2.0
+            info["ml_signal"] = ml_sig
+            info["confidence"] = conf
+            info["ml_agrees"] = (ml_sig == rule_signal) if rule_signal != 0 else None
+            is_hold = self._open_signals.get(coin, 0) == rule_signal
+            info["is_hold"] = is_hold
+            info["min_conf"] = self.ML_HOLD_MIN_CONFIDENCE if is_hold else self.ML_CONFIDENCE_THRESHOLD
+
+        if candidate is not None:
+            dec = candidate["decision"]
+            info["leverage"] = dec.get("leverage")
+            info["stop_loss"] = dec.get("stop_loss")
+            info["take_profit"] = dec.get("take_profit")
+            info["entry_price"] = float(df["Close"].iloc[-1])
+            if len(df) >= ATR_PERIOD:
+                atr_v = _atr(df, ATR_PERIOD).iloc[-1]
+                atr_pct_v = _atr_pct(df, ATR_PERIOD).iloc[-1]
+                info["atr"] = float(atr_v) if not pd.isna(atr_v) else None
+                info["atr_pct"] = float(atr_pct_v) if not pd.isna(atr_pct_v) else None
+            bb_w_val = info.get("bb_width")
+            info["risk_reward"] = 3.0 if (bb_w_val is not None and bb_w_val > 0.08) else 1.5
+
+        return info
+
     def _load_models(self) -> None:
         for coin in COINS:
             path = _model_path(coin)
