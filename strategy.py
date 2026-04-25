@@ -63,6 +63,7 @@ class MyStrategy(BaseStrategy):
     def __init__(self):
         super().__init__()
         self._open_signals: dict[str, int] = {coin: 0 for coin in COINS}
+        self._open_allocations: dict[str, float] = {coin: 0.0 for coin in COINS}
         self.models: dict[str, object] = {}
         self.model_feature_names: dict[str, list[str]] = {}
         self.model_metadata: dict[str, dict] = {}
@@ -114,19 +115,32 @@ class MyStrategy(BaseStrategy):
 
         candidates.sort(key=lambda item: item["confidence"], reverse=True)
         active = candidates[:MAX_ACTIVE_COINS]
-        n_active = len(active)
 
-        if n_active == 1:
-            active[0]["decision"]["allocation"] = MAX_TOTAL_ALLOCATION
-            decisions[active[0]["decision"]["coin"]] = active[0]["decision"]
-        elif n_active > 1:
-            total_conf = sum(c["confidence"] for c in active)
-            for candidate in active:
-                weight = candidate["confidence"] / total_conf
-                candidate["decision"]["allocation"] = round(
-                    min(weight * MAX_TOTAL_ALLOCATION, MAX_TOTAL_ALLOCATION), 4
-                )
-                decisions[candidate["decision"]["coin"]] = candidate["decision"]
+        held_allocation = 0.0
+        new_candidates = []
+        for candidate in active:
+            coin = candidate["decision"]["coin"]
+            if candidate.get("is_hold", False):
+                allocation = self._open_allocations.get(coin, 0.0)
+                candidate["decision"]["allocation"] = allocation
+                decisions[coin] = candidate["decision"]
+                held_allocation += allocation
+            else:
+                new_candidates.append(candidate)
+
+        available_allocation = max(0.0, MAX_TOTAL_ALLOCATION - held_allocation)
+        if new_candidates and available_allocation > 0:
+            if len(new_candidates) == 1:
+                new_candidates[0]["decision"]["allocation"] = round(available_allocation, 4)
+                decisions[new_candidates[0]["decision"]["coin"]] = new_candidates[0]["decision"]
+            else:
+                total_conf = sum(c["confidence"] for c in new_candidates)
+                for candidate in new_candidates:
+                    weight = candidate["confidence"] / total_conf
+                    candidate["decision"]["allocation"] = round(
+                        min(weight * available_allocation, available_allocation), 4
+                    )
+                    decisions[candidate["decision"]["coin"]] = candidate["decision"]
 
         if _verbose:
             for coin in COINS:
@@ -139,6 +153,7 @@ class MyStrategy(BaseStrategy):
         ordered = [decisions[coin] for coin in COINS]
         ordered.sort(key=lambda d: (d["signal"] != 0, d["coin"]))
         self._open_signals = {d["coin"]: d["signal"] for d in ordered}
+        self._open_allocations = {d["coin"]: float(d["allocation"]) for d in ordered}
         return ordered
 
     def _rule_signal(self, coin: str, df: pd.DataFrame, data: dict) -> int:
@@ -394,7 +409,7 @@ class MyStrategy(BaseStrategy):
             "stop_loss": stop_loss,
             "take_profit": take_profit,
         }
-        return {"decision": decision, "confidence": confidence}
+        return {"decision": decision, "confidence": confidence, "is_hold": is_hold}
 
 
 def _model_path(coin: str) -> Path:
