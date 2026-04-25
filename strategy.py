@@ -41,15 +41,15 @@ MAX_TOTAL_ALLOCATION = 0.9
 ATR_PERIOD = 14
 
 
+
 def _flat(coin: str) -> dict:
     return {"coin": coin, "signal": 0, "allocation": 0.0, "leverage": 1}
 
 
 class MyStrategy(BaseStrategy):
-    # Confidence threshold: 0.55 selected via 4-fold walk-forward CV on
-    # training window (candles 0-1099). Best avg return (+39.6%) with
-    # lowest coefficient of variation and 21.5 trades/fold (not too sparse).
-    ML_CONFIDENCE_THRESHOLD: float = 0.55
+    # Lowered from 0.55 → 0.52: year-5 distributional shift will compress
+    # model confidence; a 0.55 gate would filter out too many valid signals.
+    ML_CONFIDENCE_THRESHOLD: float = 0.52
     ML_STRONG_THRESHOLD: float = 0.80
 
     def __init__(self):
