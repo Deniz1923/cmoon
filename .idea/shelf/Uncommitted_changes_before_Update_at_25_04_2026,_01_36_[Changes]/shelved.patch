@@ -1,0 +1,208 @@
+Index: strategy.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>\"\"\"\nFinal submission strategy.\n\nPerson 3's ML/ensemble plumbing is complete here. Person 2 only needs to\nreplace _rule_signal() with the rule-based trend/mean-reversion signal.\nUntil then, the strategy is intentionally runnable-flat.\n\"\"\"\nfrom __future__ import annotations\n\nimport pickle\nfrom pathlib import Path\n\nimport numpy as np\nimport pandas as pd\n\nfrom cnlib.base_strategy import BaseStrategy\nfrom research.features import (\n    atr as _atr,\n    atr_pct as _atr_pct,\n    bb_width as _bb_width,\n    bb_pct as _bb_pct,\n    ema as _ema,\n    rsi as _rsi,\n)\nfrom research.ml_features import build_features_single as _build_features_single\nfrom research.risk import (\n    dynamic_leverage as _dynamic_leverage,\n    stop_loss_price as _stop_loss_price,\n    take_profit_price as _take_profit_price,\n    position_allocation as _position_allocation,\n)\n\nCOINS = [\"kapcoin-usd_train\", \"metucoin-usd_train\", \"tamcoin-usd_train\"]\nRESULTS_DIR = Path(__file__).parent / \"results\"\n\nMIN_FEATURE_ROWS = 55\nTARGET_HORIZON = 3\nMAX_ACTIVE_COINS = 2\nMAX_TOTAL_ALLOCATION = 0.9\nATR_PERIOD = 14\n\n\ndef _flat(coin: str) -> dict:\n    return {\"coin\": coin, \"signal\": 0, \"allocation\": 0.0, \"leverage\": 1}\n\n\nclass MyStrategy(BaseStrategy):\n    # Confidence threshold: 0.55 selected via 4-fold walk-forward CV on\n    # training window (candles 0-1099). Best avg return (+39.6%) with\n    # lowest coefficient of variation and 21.5 trades/fold (not too sparse).\n    ML_CONFIDENCE_THRESHOLD: float = 0.55\n    ML_STRONG_THRESHOLD: float = 0.80\n\n    def __init__(self):\n        super().__init__()\n        self._open_signals: dict[str, int] = {coin: 0 for coin in COINS}\n        self.models: dict[str, object] = {}\n        self.model_feature_names: dict[str, list[str]] = {}\n        self.model_metadata: dict[str, dict] = {}\n        self._load_models()\n\n    def predict(self, data: dict) -> list[dict]:\n        candidates = []\n        decisions = {coin: _flat(coin) for coin in COINS}\n\n        for coin in COINS:\n            df = data.get(coin)\n            if df is None:\n                continue\n\n            rule_signal = self._rule_signal(coin, df, data)\n            if rule_signal == 0:\n                continue\n\n            ml_prob_up = self._ml_prob(coin, data)\n            candidate = self._candidate_decision(coin, df, rule_signal, ml_prob_up)\n            if candidate is not None:\n                candidates.append(candidate)\n\n        candidates.sort(key=lambda item: item[\"confidence\"], reverse=True)\n        active = candidates[:MAX_ACTIVE_COINS]\n        n_active = len(active)\n\n        for candidate in active:\n            strength = 1.0 if candidate[\"confidence\"] >= self.__class__.ML_STRONG_THRESHOLD else 0.5\n            decision = candidate[\"decision\"]\n            decision[\"allocation\"] = _position_allocation(n_active, strength)\n            decisions[decision[\"coin\"]] = decision\n\n        ordered = [decisions[coin] for coin in COINS]\n        self._open_signals = {d[\"coin\"]: d[\"signal\"] for d in ordered}\n        return ordered\n\n    def _rule_signal(self, coin: str, df: pd.DataFrame, data: dict) -> int:\n        \"\"\"Person 2 hook: return +1 long, -1 short, or 0 flat.\"\"\"\n        if len(df) < MIN_FEATURE_ROWS:\n            return 0\n\n        close = df[\"Close\"]\n        current_bw = _bb_width(close).iloc[-1]\n\n        if pd.isna(current_bw):\n            return 0\n\n        # Trending regime — EMA crossover\n        if current_bw > 0.08:\n            fast = _ema(close, 20)\n            slow = _ema(close, 50)\n            if pd.isna(fast.iloc[-1]) or pd.isna(slow.iloc[-1]):\n                return 0\n            return 1 if fast.iloc[-1] > slow.iloc[-1] else -1\n\n        # Ranging regime — RSI + BB position\n        if current_bw < 0.06:\n            rsi_val = _rsi(close).iloc[-1]\n            bb_pct_val = _bb_pct(close).iloc[-1]\n            if pd.isna(rsi_val) or pd.isna(bb_pct_val):\n                return 0\n            if rsi_val < 35 and bb_pct_val < 0.2:\n                return 1\n            if rsi_val > 65 and bb_pct_val > 0.8:\n                return -1\n            return 0\n\n        # Ambiguous regime — stay flat\n        return 0\n\n    def _load_models(self) -> None:\n        for coin in COINS:\n            path = _model_path(coin)\n            if not path.exists():\n                continue\n\n            try:\n                with open(path, \"rb\") as f:\n                    payload = pickle.load(f)\n            except (OSError, pickle.PickleError, AttributeError, ImportError, EOFError) as exc:\n                print(f\"[MyStrategy] WARNING: failed to load model for {coin}: {type(exc).__name__}: {exc}\")\n                continue\n\n            if isinstance(payload, dict) and \"estimator\" in payload:\n                self.models[coin] = payload[\"estimator\"]\n                self.model_feature_names[coin] = list(payload.get(\"feature_names\") or [])\n                self.model_metadata[coin] = {\n                    key: value\n                    for key, value in payload.items()\n                    if key not in {\"estimator\"}\n                }\n            else:\n                self.models[coin] = payload\n\n    def _ml_prob(self, coin: str, data: dict) -> float | None:\n        model = self.models.get(coin)\n        if model is None:\n            return None\n\n        row = self._ml_feature_row(coin, data)\n        if row is None:\n            return None\n\n        if hasattr(model, \"predict_proba\"):\n            proba = model.predict_proba(row)\n            if proba is None or len(proba) == 0:\n                return None\n\n            classes = list(getattr(model, \"classes_\", []))\n            if 1 in classes:\n                col = classes.index(1)\n            elif len(proba[0]) >= 2:\n                col = 1\n            else:\n                return None\n            return float(proba[0][col])\n\n        if hasattr(model, \"predict\"):\n            return float(model.predict(row)[0])\n\n        return None\n\n    def _ml_feature_row(self, coin: str, data: dict) -> np.ndarray | None:\n        df = data.get(coin)\n        if df is None:\n            return None\n\n        leader = data[\"kapcoin-usd_train\"][\"Close\"] if coin != \"kapcoin-usd_train\" else None\n        features = _build_features_single(df, leader_close=leader)\n        features = features.replace([np.inf, -np.inf], np.nan)\n        if len(features.dropna()) <= MIN_FEATURE_ROWS:\n            return None\n\n        names = self.model_feature_names.get(coin) or list(features.columns)\n        row = features.iloc[[-1]].reindex(columns=names)\n        if row.isna().any(axis=None):\n            return None\n        return row.to_numpy(dtype=np.float32)\n\n    def _candidate_decision(\n        self,\n        coin: str,\n        df: pd.DataFrame,\n        rule_signal: int,\n        ml_prob_up: float | None,\n    ) -> dict | None:\n        if rule_signal not in {-1, 1} or ml_prob_up is None:\n            return None\n\n        if not 0.0 <= ml_prob_up <= 1.0:\n            return None\n\n        ml_signal = 1 if ml_prob_up > 0.5 else -1 if ml_prob_up < 0.5 else 0\n        confidence = abs(ml_prob_up - 0.5) * 2.0\n        if ml_signal != rule_signal or confidence < self.__class__.ML_CONFIDENCE_THRESHOLD:\n            return None\n\n        current_atr = _atr(df, ATR_PERIOD).iloc[-1]\n        current_atr_pct = _atr_pct(df, ATR_PERIOD).iloc[-1]\n        if pd.isna(current_atr) or pd.isna(current_atr_pct) or current_atr <= 0:\n            return None\n\n        entry = float(df[\"Close\"].iloc[-1])\n        lev = _dynamic_leverage(float(current_atr_pct))\n        decision = {\n            \"coin\": coin,\n            \"signal\": rule_signal,\n            \"allocation\": 0.0,\n            \"leverage\": lev,\n            \"stop_loss\": _stop_loss_price(entry, rule_signal, float(current_atr), leverage=lev),\n            \"take_profit\": _take_profit_price(entry, rule_signal, float(current_atr)),\n        }\n        return {\"decision\": decision, \"confidence\": confidence}\n\n\ndef _model_path(coin: str) -> Path:\n    return RESULTS_DIR / f\"model_{coin.replace('-', '_')}.pkl\"\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/strategy.py b/strategy.py
+--- a/strategy.py	(revision f32f6a644b3784dfe18d62216fba19b1e4e2a777)
++++ b/strategy.py	(date 1777070044274)
+@@ -21,6 +21,7 @@
+     bb_pct as _bb_pct,
+     ema as _ema,
+     rsi as _rsi,
++    volume_ratio as _volume_ratio,
+ )
+ from research.ml_features import build_features_single as _build_features_single
+ from research.risk import (
+@@ -73,7 +74,11 @@
+                 continue
+ 
+             ml_prob_up = self._ml_prob(coin, data)
+-            candidate = self._candidate_decision(coin, df, rule_signal, ml_prob_up)
++            try:
++                candidate = self._candidate_decision(coin, df, rule_signal, ml_prob_up)
++            except Exception as exc:
++                print(f"[MyStrategy] WARNING: _candidate_decision failed for {coin}: {type(exc).__name__}: {exc}")
++                candidate = None
+             if candidate is not None:
+                 candidates.append(candidate)
+ 
+@@ -102,13 +107,28 @@
+         if pd.isna(current_bw):
+             return 0
+ 
+-        # Trending regime — EMA crossover
++        # Trending regime — EMA position + RSI momentum confirmation
+         if current_bw > 0.08:
+             fast = _ema(close, 20)
+             slow = _ema(close, 50)
+             if pd.isna(fast.iloc[-1]) or pd.isna(slow.iloc[-1]):
+                 return 0
+-            return 1 if fast.iloc[-1] > slow.iloc[-1] else -1
++            ema_signal = 1 if fast.iloc[-1] > slow.iloc[-1] else -1
++
++            # RSI momentum must agree with trend direction
++            rsi_val = _rsi(close).iloc[-1]
++            if not pd.isna(rsi_val):
++                if ema_signal == 1 and rsi_val < 50:
++                    return 0  # EMA bullish but RSI below midpoint — weakening trend
++                if ema_signal == -1 and rsi_val > 50:
++                    return 0  # EMA bearish but RSI above midpoint — weakening trend
++
++            # Skip very low-volume candles (likely false breakouts)
++            vol_r = _volume_ratio(df, 20).iloc[-1]
++            if not pd.isna(vol_r) and vol_r < 0.5:
++                return 0
++
++            return ema_signal
+ 
+         # Ranging regime — RSI + BB position
+         if current_bw < 0.06:
+@@ -209,7 +229,16 @@
+ 
+         ml_signal = 1 if ml_prob_up > 0.5 else -1 if ml_prob_up < 0.5 else 0
+         confidence = abs(ml_prob_up - 0.5) * 2.0
+-        if ml_signal != rule_signal or confidence < self.__class__.ML_CONFIDENCE_THRESHOLD:
++
++        if ml_signal != rule_signal:
++            # ML disagrees on direction — always exit or skip entry
++            return None
++
++        # Holding an existing position in the same direction: relax confidence gate
++        # (don't prematurely close a trade just because ML became uncertain)
++        # New entries still require full confidence threshold
++        is_hold = (self._open_signals.get(coin, 0) == rule_signal)
++        if not is_hold and confidence < self.__class__.ML_CONFIDENCE_THRESHOLD:
+             return None
+ 
+         current_atr = _atr(df, ATR_PERIOD).iloc[-1]
+@@ -217,6 +246,14 @@
+         if pd.isna(current_atr) or pd.isna(current_atr_pct) or current_atr <= 0:
+             return None
+ 
++        # Regime-aware risk/reward: let winners run in trends, take quick profits in ranges
++        close = df["Close"]
++        current_bw = _bb_width(close).iloc[-1]
++        if not pd.isna(current_bw) and current_bw > 0.08:
++            risk_reward = 3.0  # trending — hold for larger moves
++        else:
++            risk_reward = 1.5  # ranging — mean-revert targets are smaller
++
+         entry = float(df["Close"].iloc[-1])
+         lev = _dynamic_leverage(float(current_atr_pct))
+         decision = {
+@@ -225,7 +262,7 @@
+             "allocation": 0.0,
+             "leverage": lev,
+             "stop_loss": _stop_loss_price(entry, rule_signal, float(current_atr), leverage=lev),
+-            "take_profit": _take_profit_price(entry, rule_signal, float(current_atr)),
++            "take_profit": _take_profit_price(entry, rule_signal, float(current_atr), risk_reward=risk_reward),
+         }
+         return {"decision": decision, "confidence": confidence}
+ 
+Index: run.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>\"\"\"\nLocal backtest runner — run this to test any strategy quickly.\n\nUsage:\n  .venv/bin/python run.py                         # runs the current strategy.py\n  .venv/bin/python run.py --strategy trend        # runs TrendStrategy\n  .venv/bin/python run.py --strategy meanrevert\n\nAdd --plot to show the equity curve (requires matplotlib).\n\"\"\"\nimport argparse\nimport sys\nfrom pathlib import Path\nfrom typing import Callable\n\nfrom cnlib.base_strategy import BaseStrategy\nfrom research.backtest_window import run_backtest_window\n\n# ---------------------------------------------------------------------------\n# Strategy registry — add new strategies here as they're built\n# ---------------------------------------------------------------------------\n\nStrategyFactory = Callable[[], BaseStrategy]\n\n\ndef _main_strategy() -> BaseStrategy:\n    from strategy import MyStrategy\n    return MyStrategy()\n\n\ndef _trend_strategy() -> BaseStrategy:\n    from research.trend_strategy import TrendStrategy\n    return TrendStrategy()\n\n\ndef _mean_revert_strategy() -> BaseStrategy:\n    from research.mean_revert_strategy import MeanRevertStrategy\n    return MeanRevertStrategy()\n\n\nSTRATEGIES: dict[str, StrategyFactory] = {\n    \"main\": _main_strategy,\n    \"trend\": _trend_strategy,\n    \"meanrevert\": _mean_revert_strategy,\n}\n\n\ndef get_strategy(name: str):\n    factory = STRATEGIES.get(name)\n    if name not in STRATEGIES:\n        available = \", \".join(STRATEGIES)\n        raise ValueError(f\"Unknown strategy '{name}'. Available: {available}\")\n    return factory()\n\n\ndef plot_equity(result, strategy_name: str) -> None:\n    try:\n        import matplotlib.pyplot as plt\n    except ImportError:\n        print(\"pip install matplotlib to enable plots\")\n        return\n\n    df = result.portfolio_dataframe()\n    fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)\n\n    # Equity curve\n    axes[0].plot(df[\"candle_index\"], df[\"portfolio_value\"], label=\"Portfolio Value\")\n    axes[0].axhline(3000, color=\"gray\", linestyle=\"--\", label=\"Initial Capital\")\n    axes[0].set_ylabel(\"Portfolio ($)\")\n    axes[0].set_title(f\"{strategy_name} — Equity Curve\")\n    axes[0].legend()\n\n    # Coin prices (normalized to 100)\n    price_cols = [c for c in df.columns if c.endswith(\"_price\")]\n    for col in price_cols:\n        norm = df[col] / df[col].iloc[0] * 100\n        axes[1].plot(df[\"candle_index\"], norm, label=col.replace(\"_price\", \"\"), alpha=0.7)\n    axes[1].set_ylabel(\"Price (normalized to 100)\")\n    axes[1].set_xlabel(\"Candle Index\")\n    axes[1].legend()\n\n    plt.tight_layout()\n\n    # Save\n    out = Path(\"results\") / f\"{strategy_name}_equity.png\"\n    out.parent.mkdir(exist_ok=True)\n    plt.savefig(out, dpi=150)\n    print(f\"Plot saved → {out}\")\n    plt.show()\n\n\ndef main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--strategy\", default=\"main\", choices=sorted(STRATEGIES), help=\"Strategy to run\")\n    parser.add_argument(\"--capital\",  type=float, default=3000.0)\n    parser.add_argument(\"--start\",    type=int,   default=0, help=\"start_candle (warm-up skip)\")\n    parser.add_argument(\"--end\",      type=int,   default=None, help=\"inclusive end_candle\")\n    parser.add_argument(\"--data-dir\", type=Path,  default=None, help=\"directory containing coin parquet files\")\n    parser.add_argument(\"--list-strategies\", action=\"store_true\", help=\"show available strategies and exit\")\n    parser.add_argument(\"--plot\",     action=\"store_true\")\n    parser.add_argument(\"--silent\",   action=\"store_true\")\n    args = parser.parse_args()\n\n    if args.list_strategies:\n        for name in STRATEGIES:\n            print(f\"{name}\\tready\")\n        return\n\n    try:\n        strategy = get_strategy(args.strategy)\n    except ValueError as exc:\n        print(exc, file=sys.stderr)\n        sys.exit(2)\n\n    print(f\"Running strategy: {args.strategy}\")\n    result = run_backtest_window(\n        strategy,\n        initial_capital=args.capital,\n        start_candle=args.start,\n        end_candle=args.end,\n        data_dir=args.data_dir,\n        silent=args.silent,\n    )\n    result.print_summary()\n\n    if args.plot:\n        plot_equity(result, args.strategy)\n\n\nif __name__ == \"__main__\":\n    main()\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/run.py b/run.py
+--- a/run.py	(revision f32f6a644b3784dfe18d62216fba19b1e4e2a777)
++++ b/run.py	(date 1777069782395)
+@@ -46,11 +46,10 @@
+ 
+ 
+ def get_strategy(name: str):
+-    factory = STRATEGIES.get(name)
+     if name not in STRATEGIES:
+         available = ", ".join(STRATEGIES)
+         raise ValueError(f"Unknown strategy '{name}'. Available: {available}")
+-    return factory()
++    return STRATEGIES[name]()
+ 
+ 
+ def plot_equity(result, strategy_name: str) -> None:
+Index: .idea/workspace.xml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<project version=\"4\">\n  <component name=\"ChangeListManager\">\n    <list default=\"true\" id=\"5e57150d-4733-4c1b-ac0b-f5ac989f0f86\" name=\"Changes\" comment=\"\">\n      <change beforePath=\"$PROJECT_DIR$/pyproject.toml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/pyproject.toml\" afterDir=\"false\" />\n      <change beforePath=\"$PROJECT_DIR$/uv.lock\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/uv.lock\" afterDir=\"false\" />\n    </list>\n    <option name=\"SHOW_DIALOG\" value=\"false\" />\n    <option name=\"HIGHLIGHT_CONFLICTS\" value=\"true\" />\n    <option name=\"HIGHLIGHT_NON_ACTIVE_CHANGELIST\" value=\"false\" />\n    <option name=\"LAST_RESOLUTION\" value=\"IGNORE\" />\n  </component>\n  <component name=\"Git.Settings\">\n    <option name=\"RECENT_GIT_ROOT_PATH\" value=\"$PROJECT_DIR$\" />\n  </component>\n  <component name=\"GitHubPullRequestSearchHistory\">{\n  &quot;lastFilter&quot;: {\n    &quot;state&quot;: &quot;OPEN&quot;,\n    &quot;assignee&quot;: &quot;Daggerabuse&quot;\n  }\n}</component>\n  <component name=\"GithubPullRequestsUISettings\">{\n  &quot;selectedUrlAndAccountId&quot;: {\n    &quot;url&quot;: &quot;https://github.com/Deniz1923/cmoon.git&quot;,\n    &quot;accountId&quot;: &quot;1d120436-7cde-4f40-b50e-eadb2ee5b5c5&quot;\n  }\n}</component>\n  <component name=\"ProjectColorInfo\">{\n  &quot;customColor&quot;: &quot;&quot;,\n  &quot;associatedIndex&quot;: 8\n}</component>\n  <component name=\"ProjectId\" id=\"3CoN9sUVKcn4wKmZbk9XHz6pz2d\" />\n  <component name=\"ProjectViewState\">\n    <option name=\"hideEmptyMiddlePackages\" value=\"true\" />\n    <option name=\"showLibraryContents\" value=\"true\" />\n  </component>\n  <component name=\"PropertiesComponent\"><![CDATA[{\n  \"keyToString\": {\n    \"ASKED_SHARE_PROJECT_CONFIGURATION_FILES\": \"true\",\n    \"ModuleVcsDetector.initialDetectionPerformed\": \"true\",\n    \"RunOnceActivity.ShowReadmeOnStart\": \"true\",\n    \"RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252\": \"true\",\n    \"RunOnceActivity.git.unshallow\": \"true\",\n    \"RunOnceActivity.typescript.service.memoryLimit.init\": \"true\",\n    \"codeWithMe.voiceChat.enabledByDefault\": \"false\",\n    \"com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1\": \"true\",\n    \"git-widget-placeholder\": \"master\",\n    \"junie.onboarding.icon.badge.shown\": \"true\",\n    \"nodejs_package_manager_path\": \"npm\",\n    \"to.speed.mode.migration.done\": \"true\",\n    \"vue.rearranger.settings.migration\": \"true\"\n  }\n}]]></component>\n  <component name=\"SharedIndexes\">\n    <attachedChunks>\n      <set>\n        <option value=\"bundled-python-sdk-b63d5a1f7c97-b61e75351b1f-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.22158.340\" />\n      </set>\n    </attachedChunks>\n  </component>\n  <component name=\"TaskManager\">\n    <task active=\"true\" id=\"Default\" summary=\"Default task\">\n      <changelist id=\"5e57150d-4733-4c1b-ac0b-f5ac989f0f86\" name=\"Changes\" comment=\"\" />\n      <created>1777047693144</created>\n      <option name=\"number\" value=\"Default\" />\n      <option name=\"presentableId\" value=\"Default\" />\n      <updated>1777047693144</updated>\n      <workItem from=\"1777047694228\" duration=\"114000\" />\n      <workItem from=\"1777047816422\" duration=\"5961000\" />\n      <workItem from=\"1777058990026\" duration=\"890000\" />\n    </task>\n    <servers />\n  </component>\n  <component name=\"TypeScriptGeneratedFilesManager\">\n    <option name=\"version\" value=\"3\" />\n  </component>\n  <component name=\"Vcs.Log.Tabs.Properties\">\n    <option name=\"OPEN_GENERIC_TABS\">\n      <map>\n        <entry key=\"efd8404f-83a8-4a10-9418-43e320a977a7\" value=\"TOOL_WINDOW\" />\n      </map>\n    </option>\n    <option name=\"TAB_STATES\">\n      <map>\n        <entry key=\"efd8404f-83a8-4a10-9418-43e320a977a7\">\n          <value>\n            <State />\n          </value>\n        </entry>\n      </map>\n    </option>\n  </component>\n</project>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/workspace.xml b/.idea/workspace.xml
+--- a/.idea/workspace.xml	(revision f32f6a644b3784dfe18d62216fba19b1e4e2a777)
++++ b/.idea/workspace.xml	(date 1777068941766)
+@@ -1,10 +1,7 @@
+ <?xml version="1.0" encoding="UTF-8"?>
+ <project version="4">
+   <component name="ChangeListManager">
+-    <list default="true" id="5e57150d-4733-4c1b-ac0b-f5ac989f0f86" name="Changes" comment="">
+-      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
+-    </list>
++    <list default="true" id="5e57150d-4733-4c1b-ac0b-f5ac989f0f86" name="Changes" comment="" />
+     <option name="SHOW_DIALOG" value="false" />
+     <option name="HIGHLIGHT_CONFLICTS" value="true" />
+     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+@@ -38,6 +35,7 @@
+   "keyToString": {
+     "ASKED_SHARE_PROJECT_CONFIGURATION_FILES": "true",
+     "ModuleVcsDetector.initialDetectionPerformed": "true",
++    "Python.run.executor": "Run",
+     "RunOnceActivity.ShowReadmeOnStart": "true",
+     "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+     "RunOnceActivity.git.unshallow": "true",
+@@ -67,7 +65,7 @@
+       <updated>1777047693144</updated>
+       <workItem from="1777047694228" duration="114000" />
+       <workItem from="1777047816422" duration="5961000" />
+-      <workItem from="1777058990026" duration="890000" />
++      <workItem from="1777058990026" duration="4213000" />
+     </task>
+     <servers />
+   </component>
+@@ -90,4 +88,7 @@
+       </map>
+     </option>
+   </component>
++  <component name="com.intellij.coverage.CoverageDataManagerImpl">
++    <SUITE FILE_PATH="coverage/cmoon$run.coverage" NAME="run Coverage Results" MODIFIED="1777065659326" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
++  </component>
+ </project>
+\ No newline at end of file
+Index: research/mean_revert_strategy.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>\"\"\"\nMean-reversion strategy — fires in ranging (non-trending) markets.\n\nLogic:\n  1. Only trade when BB width is below threshold (ranging regime)\n  2. Long when RSI oversold AND price near lower BB\n  3. Short when RSI overbought AND price near upper BB\n  4. Lower leverage (2x max) — mean reversion profits are smaller, survive chop\n\nThis file is runnable standalone:\n  python research/mean_revert_strategy.py\n\"\"\"\nimport pandas as pd\nfrom cnlib.base_strategy import BaseStrategy\nfrom cnlib import backtest\n\nfrom research.features import (\n    rsi, bb_bands, bb_pct, bb_width, atr, atr_pct, COINS,\n)\nfrom research.risk import dynamic_leverage, stop_loss_price, take_profit_price, position_allocation\n\n# ---------------------------------------------------------------------------\n# Tunable parameters\n# ---------------------------------------------------------------------------\n\nRSI_PERIOD = 14\nRSI_OVERSOLD = 35        # TODO: try 25, 30, 35, 40\nRSI_OVERBOUGHT = 65      # TODO: try 60, 65, 70, 75\nBB_PERIOD = 20\nBB_PCTB_LOW = 0.2        # price in lower 20% of bands → long candidate\nBB_PCTB_HIGH = 0.8       # price in upper 80% of bands → short candidate\nBB_RANGE_THRESHOLD = 0.06  # bb_width below this = ranging market\nATR_PERIOD = 14\nATR_MULTIPLIER = 1.5     # tighter stops for mean reversion (quicker reversals expected)\nRISK_REWARD = 1.5        # 1.5:1 — mean reversion targets are smaller\nMAX_LEVERAGE = 2         # hard cap; mean reversion is inherently counter-trend\nMIN_CANDLES = BB_PERIOD + RSI_PERIOD + 5\n\n\nclass MeanRevertStrategy(BaseStrategy):\n    def __init__(self):\n        super().__init__()\n        self._open_signals: dict[str, int] = {c: 0 for c in COINS}\n\n    def predict(self, data: dict) -> list[dict]:\n        flat_decisions = []\n        candidates = []\n\n        for coin in COINS:\n            df = data[coin]\n            if len(df) < MIN_CANDLES:\n                flat_decisions.append({\"coin\": coin, \"signal\": 0, \"allocation\": 0.0, \"leverage\": 1})\n                continue\n            decision = self._decide(coin, df)\n            if decision[\"signal\"] != 0:\n                candidates.append(decision)\n            else:\n                flat_decisions.append(decision)\n\n        # Mean reversion: one coin at a time — highest ATR-filtered pick\n        active = candidates[:1]\n        n_active = len(active)\n        for dec in active:\n            dec[\"allocation\"] = position_allocation(n_active_coins=max(n_active, 1))\n\n        for dec in candidates[1:]:\n            dec[\"signal\"] = 0\n            dec[\"allocation\"] = 0.0\n            flat_decisions.append(dec)\n\n        decision_map = {d[\"coin\"]: d for d in flat_decisions + active}\n        return [decision_map[coin] for coin in COINS]\n\n    def _decide(self, coin: str, df: pd.DataFrame) -> dict:\n        current_rsi = rsi(df[\"Close\"], RSI_PERIOD).iloc[-1]\n        current_bb_pct = bb_pct(df[\"Close\"], BB_PERIOD).iloc[-1]\n        current_bw = bb_width(df[\"Close\"], BB_PERIOD).iloc[-1]\n        current_atr = atr(df, ATR_PERIOD).iloc[-1]\n        current_atr_pct = atr_pct(df, ATR_PERIOD).iloc[-1]\n\n        # Regime gate — only trade in ranging markets\n        if pd.isna(current_bw) or current_bw > BB_RANGE_THRESHOLD:\n            self._open_signals[coin] = 0\n            return {\"coin\": coin, \"signal\": 0, \"allocation\": 0.0, \"leverage\": 1}\n\n        # Guard against bad indicator values\n        if pd.isna(current_rsi) or pd.isna(current_bb_pct):\n            self._open_signals[coin] = 0\n            return {\"coin\": coin, \"signal\": 0, \"allocation\": 0.0, \"leverage\": 1}\n\n        # Entry signals — both RSI and BB position must agree\n        long_signal  = current_rsi < RSI_OVERSOLD  and current_bb_pct < BB_PCTB_LOW\n        short_signal = current_rsi > RSI_OVERBOUGHT and current_bb_pct > BB_PCTB_HIGH\n\n        if long_signal:\n            signal = 1\n        elif short_signal:\n            signal = -1\n        else:\n            # Conditions no longer hold — close any open position\n            self._open_signals[coin] = 0\n            return {\"coin\": coin, \"signal\": 0, \"allocation\": 0.0, \"leverage\": 1}\n\n        if pd.isna(current_atr) or current_atr <= 0 or pd.isna(current_atr_pct):\n            self._open_signals[coin] = 0\n            return {\"coin\": coin, \"signal\": 0, \"allocation\": 0.0, \"leverage\": 1}\n\n        leverage = min(dynamic_leverage(float(current_atr_pct)), MAX_LEVERAGE)\n        entry = float(df[\"Close\"].iloc[-1])\n        sl = stop_loss_price(entry, signal, float(current_atr), ATR_MULTIPLIER)\n        tp = take_profit_price(entry, signal, float(current_atr), RISK_REWARD, ATR_MULTIPLIER)\n        alloc = position_allocation(n_active_coins=1)\n\n        self._open_signals[coin] = signal\n        return {\n            \"coin\": coin,\n            \"signal\": signal,\n            \"allocation\": alloc,\n            \"leverage\": leverage,\n            \"stop_loss\": sl,\n            \"take_profit\": tp,\n        }\n\n\nif __name__ == \"__main__\":\n    result = backtest.run(MeanRevertStrategy(), start_candle=MIN_CANDLES, silent=False)\n    result.print_summary()\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/research/mean_revert_strategy.py b/research/mean_revert_strategy.py
+--- a/research/mean_revert_strategy.py	(revision f32f6a644b3784dfe18d62216fba19b1e4e2a777)
++++ b/research/mean_revert_strategy.py	(date 1777069777848)
+@@ -57,11 +57,11 @@
+             else:
+                 flat_decisions.append(decision)
+ 
+-        # Mean reversion: one coin at a time — highest ATR-filtered pick
++        # Mean reversion: one coin at a time, half allocation — counter-trend is higher risk
+         active = candidates[:1]
+         n_active = len(active)
+         for dec in active:
+-            dec["allocation"] = position_allocation(n_active_coins=max(n_active, 1))
++            dec["allocation"] = position_allocation(n_active_coins=max(n_active, 1), signal_strength=0.5)
+ 
+         for dec in candidates[1:]:
+             dec["signal"] = 0
+@@ -109,7 +109,7 @@
+         entry = float(df["Close"].iloc[-1])
+         sl = stop_loss_price(entry, signal, float(current_atr), ATR_MULTIPLIER)
+         tp = take_profit_price(entry, signal, float(current_atr), RISK_REWARD, ATR_MULTIPLIER)
+-        alloc = position_allocation(n_active_coins=1)
++        alloc = position_allocation(n_active_coins=1, signal_strength=0.5)  # 45% — counter-trend risk
+ 
+         self._open_signals[coin] = signal
+         return {

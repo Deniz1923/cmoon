@@ -86,11 +86,17 @@ class MyStrategy(BaseStrategy):
         active = candidates[:MAX_ACTIVE_COINS]
         n_active = len(active)
 
-        for candidate in active:
-            strength = 1.0 if candidate["confidence"] >= self.__class__.ML_STRONG_THRESHOLD else 0.5
-            decision = candidate["decision"]
-            decision["allocation"] = _position_allocation(n_active, strength)
-            decisions[decision["coin"]] = decision
+        if n_active == 1:
+            active[0]["decision"]["allocation"] = MAX_TOTAL_ALLOCATION
+            decisions[active[0]["decision"]["coin"]] = active[0]["decision"]
+        elif n_active > 1:
+            total_conf = sum(c["confidence"] for c in active)
+            for candidate in active:
+                weight = candidate["confidence"] / total_conf
+                candidate["decision"]["allocation"] = round(
+                    min(weight * MAX_TOTAL_ALLOCATION, MAX_TOTAL_ALLOCATION), 4
+                )
+                decisions[candidate["decision"]["coin"]] = candidate["decision"]
 
         # Order closes before opens so the engine frees cash before
         # attempting new entries (prevents failed opens from cash timing).
